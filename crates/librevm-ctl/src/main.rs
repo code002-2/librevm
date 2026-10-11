@@ -941,6 +941,7 @@ fn deploy_archive(
         ssh_user: Some(librevm_core::ssh::USER.to_string()),
         dns,
         root_password: None,
+        branding: librevm_core::image::Branding::librevm(),
     };
 
     match unpack_into(&target, compression, archive, &injections) {

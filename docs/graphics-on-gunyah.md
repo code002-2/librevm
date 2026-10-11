@@ -121,21 +121,54 @@ reach the socket: it is `srwxrwxr-x`, and root is not stopped by the mode of `/r
 
 ## What has not been made to work
 
-**No window appears.** The evidence that this is not a setup mistake:
+**No window appears, and the reason is now known.** A guest with a complete DRM stack cannot
+allocate the buffer that a scanout needs:
+
+```
+# modetest -M virtio_gpu -s 40@41:1280x1024
+opened device `virtio GPU` on driver `virtio_gpu` (version 0.1.0 at 0)
+failed to find CRTC for pipe
+failed to create dumb buffer: Invalid argument
+```
+
+`DRM_IOCTL_MODE_CREATE_DUMB` fails with `EINVAL`. A dumb buffer has to be backed by
+*g physically contiguous guest memory, and a protected VM's memory is lent to Gunyah rather
+than owned by crosvm, so no such allocation can be handed over. Without a dumb buffer the
+guest never has a framebuffer to present, so it never sends a scanout, so crosvm never
+creates the toplevel. Writes to `/dev/fb0` appear to succeed — fbdev takes a different path
+into the driver — but that path does not present either.
+
+This is the lent-memory problem that was suspected at the start of the investigation,
+arriving somewhere quite different from where it was expected. The device enumerates
+perfectly and the driver binds perfectly; the failure is one ioctl later.
+
+### What the evidence rules out
+
+Each of these was checked, and each is *not* the cause:
 
 * `failed to open display` is absent, so the backend was selected and the socket opened.
-* `deprecation warnings: 0`, so it is not the deprecated spelling.
+* `deprecation warnings: 0`, so it is not the deprecated `width`/`height` spelling.
 * crosvm holds 61 open sockets, so it is connected to the compositor.
-* The same compositor accepts a GUI program run as root (`gnome-text-editor` stayed up), so
+* The compositor accepts a GUI program running as root (`gnome-text-editor` stayed up), so
   it is not refusing root clients.
-* The guest's DRM is complete: `modetest -M virtio_gpu` lists 16 encoders, a `connected`
-  connector, and ten modes including `1280x1024` as preferred.
+* `modetest -M virtio_gpu` lists 16 encoders, a `connected` connector and ten modes
+  including `1280x1024` as preferred, so the DRM plumbing from userspace down is intact.
 
-What is left is that crosvm only creates the toplevel when the guest presents a scanout, and
-plain writes to `/dev/fb0` may not count as a present. The next step is a real modeset from
-inside the guest — `modetest -M virtio_gpu -s 40@41:1280x1024` — which failed here only
-because the test disk's `libdrm.so.2` had been corrupted by repeated writes
-(`Exec format error`).
+### Where to look next
+
+The device advertises `+resource_blob +host_visible`:
+
+```
+[drm] features: -virgl +edid +resource_blob +host_visible
+[drm] features: -context_init -blob_alignment
+```
+
+A blob resource is not a dumb buffer: it can be created from guest memory the driver already
+owns, and with `host_visible` the host can map it without needing a contiguous region of its
+own. That is very likely the supported path here — it is what DroidVM's `udmabuf=true` and
+guest-owned VRAM pool add up to — and a client that uses `DRM_IOCTL_MODE_CREATE_DUMB` will
+not find it. Worth trying: a virtio-gpu-aware client that allocates through
+`VIRTIO_GPU_BLOB_MEM_GUEST`, or a crosvm built with a 2d backend that prefers blobs.
 
 ## A note on the earlier conclusion
 

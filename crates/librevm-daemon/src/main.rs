@@ -420,6 +420,7 @@ impl Daemon {
                     ssh_user: Some(librevm_core::ssh::USER.to_string()),
                     dns,
                     root_password: None,
+                    branding: librevm_core::image::Branding::librevm(),
                 },
                 |_, _| {},
             )?;
@@ -477,6 +478,7 @@ impl Daemon {
                 ssh_user: Some(user.clone()),
                 dns,
                 root_password: None,
+                branding: librevm_core::image::Branding::librevm(),
             };
 
             let notes = librevm_core::image::inject_into_image(&path, &injections)?;

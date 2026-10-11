@@ -721,6 +721,56 @@ pub fn inject_into_image(image: &Path, what: &Injections) -> Result<Vec<String>>
     result
 }
 
+/// A fastfetch configuration that relabels the CPU and GPU lines.
+///
+/// fastfetch reads `/etc/fastfetch/config.jsonc` for every user, so one file in the image is
+/// enough, and its `format` keys take a format string with `{name}` for whatever was
+/// detected. The rest of the config is left alone: a machine that has a fastfetch of its own
+/// keeps its own logo and colours, because only the two modules named here are listed, and
+/// an unlisted module keeps its built-in default.
+fn fastfetch_config(branding: &Branding) -> String {
+    let mut modules: Vec<String> = Vec::new();
+    if let Some(cpu) = &branding.cpu {
+        modules.push(format!(
+            "    {{ \"type\": \"cpu\", \"format\": \"{}\" }}",
+            json_escape(cpu)
+        ));
+    }
+    if let Some(gpu) = &branding.gpu {
+        modules.push(format!(
+            "    {{ \"type\": \"gpu\", \"format\": \"{}\" }}",
+            json_escape(gpu)
+        ));
+    }
+    format!(
+        "// Written by librevm when this image was deployed.\n\
+         //\n\
+         // Both the CPU and the GPU would otherwise be named after the emulated hardware\n\
+         // rather than after the machine: the device tree says `dummy-virt` and the PCI ids\n\
+         // database says `RedHat Virtio`. Only these two modules are named, so everything\n\
+         // else keeps fastfetch's defaults.\n\
+         {{\n  \"modules\": [\n{}\n  ]\n}}\n",
+        modules.join(",\n")
+    )
+}
+
+/// Escape a string for a JSON document. Only the characters a format string can carry.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Write a file into a deployed image, for injecting keys and config.
 ///
 /// A symlink in the way is replaced rather than written through: a rootfs carries links
@@ -759,6 +809,93 @@ pub struct Injections {
     pub dns: Vec<String>,
     /// Set a root password hash, for console logins.
     pub root_password: Option<String>,
+    /// What to call this machine's CPU and GPU, for the tools that print them.
+    ///
+    /// A guest reports the device tree crosvm generates, so `fastfetch` says
+    /// `CPU: dummy-virt`, and it names the GPU from the PCI ids database, so it says
+    /// `GPU: RedHat Virtio 1.0 GPU`. Neither is wrong and neither says anything about the
+    /// machine the operator actually made. `fastfetch` takes a per-module format string,
+    /// so both can be relabelled from inside the image.
+    pub branding: Branding,
+}
+
+/// The names a guest's system information tools should print.
+#[derive(Debug, Clone, Default)]
+pub struct Branding {
+    /// Replaces the CPU line. Empty leaves `fastfetch` alone.
+    ///
+    /// The format string may use `{name}`, which is whatever was detected — on this
+    /// hypervisor, `dummy-virt`.
+    pub cpu: Option<String>,
+    /// Replaces the GPU line, with the same `{name}` substitution.
+    pub gpu: Option<String>,
+}
+
+impl Branding {
+    /// The defaults a librevm deployment uses.
+    ///
+    /// The guest's own idea of its CPU is the device tree crosvm generates, which says
+    /// `dummy-virt` — true, and useless. The host's model is what an operator wants to see,
+    /// so it is read here and written into the format string rather than left to `{name}`.
+    pub fn librevm() -> Self {
+        Self {
+            cpu: Some(match host_model() {
+                Some(model) => format!("librevm cpu ({model})"),
+                // Nothing identifiable: keep the detected name in brackets, which at least
+                // says something about the machine rather than nothing.
+                None => "librevm cpu ({name})".to_string(),
+            }),
+            gpu: Some("librevm virtio gpu".to_string()),
+        }
+    }
+}
+
+/// The host's own model name, if it has one that means anything.
+///
+/// On an arm64 device this is the device tree's `model`, which on the Xiaomi Pad 8 Pro reads
+/// something like `Xiaomi Pad 8 Pro`. The SoC name is the useful part and is not always in
+/// it, so `compatible` is checked too — that is where `qcom,sm8750` appears.
+fn host_model() -> Option<String> {
+    /// Read a device tree property and trim its trailing NUL.
+    fn dt(path: &str) -> Option<String> {
+        let bytes = std::fs::read(path).ok()?;
+        let text = String::from_utf8_lossy(&bytes)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    // The SoC, which is the short name worth putting in brackets.
+    if let Some(compatible) = dt("/proc/device-tree/compatible") {
+        // The property is a NUL-separated list, most specific first.
+        for entry in compatible.split('\0') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            // `qcom,sm8750` -> `sm8750`.
+            if let Some(soc) = entry.split(',').nth(1) {
+                if soc.is_empty() {
+                    continue;
+                }
+                let soc = soc.trim_end_matches("-mtp").trim_end_matches("-qrd");
+                // Qualcomm's device trees carry a codename, not the part number, so `sun`
+                // comes back where an operator expects `sm8750`. The part number is what is
+                // asked for and what people search for, so the codenames that are known are
+                // translated and anything else is passed through unchanged rather than
+                // guessed at.
+                return Some(match soc {
+                    "sun" => "sm8750".to_string(),
+                    "sunp" => "sm8750p".to_string(),
+                    other => other.to_string(),
+                });
+            }
+        }
+    }
+
+    // The machine, as a fallback.
+    dt("/proc/device-tree/model")
 }
 
 /// Apply the injections to a mounted rootfs.
@@ -825,6 +962,26 @@ pub fn inject(root: &Path, what: &Injections) -> Result<Vec<String>> {
             .context("writing the first-boot script")?;
         notes.push(format!("SSH key installed for {user}"));
         notes.push("sshd is installed on first boot, which needs a network".to_string());
+    }
+
+    // What the machine calls itself. Written as fastfetch's own config, which every user
+    // picks up from /etc/fastfetch, and harmless on an image without fastfetch.
+    if what.branding.cpu.is_some() || what.branding.gpu.is_some() {
+        let config = fastfetch_config(&what.branding);
+        match write_into_dir(root, "etc/fastfetch/config.jsonc", &config, 0o644) {
+            Ok(()) => {
+                let mut named = Vec::new();
+                if let Some(c) = &what.branding.cpu {
+                    named.push(format!("cpu {c:?}"));
+                }
+                if let Some(g) = &what.branding.gpu {
+                    named.push(format!("gpu {g:?}"));
+                }
+                notes.push(format!("named as {}", named.join(", ")));
+            }
+            // Not worth failing a deployment over: the machine works either way.
+            Err(e) => notes.push(format!("could not set the machine's name: {e:#}")),
+        }
     }
 
     if let Some(hash) = &what.root_password {
