@@ -1,0 +1,46 @@
+[Unit]
+Description=librevm virtual machine manager
+Documentation=https://github.com/code002-2/librevm
+# The daemon talks to the system bus and needs /dev/gunyah, which the kernel creates.
+After=dbus.service
+Wants=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/librevm-daemon
+Restart=on-failure
+RestartSec=2
+
+# It needs to be root: the store is root-owned and /dev/gunyah is root-only.
+User=root
+Group=root
+
+# It opens sockets for console hubs and writes under /var/lib and /run.
+RuntimeDirectory=librevm
+RuntimeDirectoryMode=0775
+StateDirectory=librevm
+StateDirectoryMode=2775
+LogsDirectory=librevm
+LogsDirectoryMode=0775
+
+# A daemon that walks a store and runs crosvm does not need the rest of the machine.
+NoNewPrivileges=yes
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/lib/librevm /run/librevm /var/log/librevm-gui.log /tmp
+PrivateTmp=no
+ProtectKernelTunables=no
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# crosvm itself gets --disable-sandbox, so the daemon must be able to create the
+# namespaces and devices a VM needs.
+RestrictNamespaces=no
+DeviceAllow=/dev/gunyah rw
+DevicePolicy=closed
+# The console hubs spawn crosvm, which wants a good deal of the system.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

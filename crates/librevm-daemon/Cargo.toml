@@ -1,0 +1,21 @@
+[package]
+name = "librevm-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The privileged half of librevm, reachable over the system bus"
+
+[[bin]]
+name = "librevm-daemon"
+path = "src/main.rs"
+
+[dependencies]
+librevm-core = { path = "../librevm-core" }
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

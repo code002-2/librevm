@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/librevm-core",
     "crates/librevm-ctl",
+    "crates/librevm-daemon",
     "crates/librevm-gui",
 ]
 
@@ -19,6 +20,7 @@ librevm-core = { path = "crates/librevm-core" }
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 log = "0.4"

@@ -6,10 +6,13 @@
 
 use crate::config::{Hypervisor, Protection, VmConfig};
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// A hypervisor that this machine can actually use.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializable because the daemon hands these to the window over the bus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Detected {
     pub hypervisor: Hypervisor,
     /// The device node it is reached through, when there is one.

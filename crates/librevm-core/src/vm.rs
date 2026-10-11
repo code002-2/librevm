@@ -70,6 +70,9 @@ pub fn state(store: &Store, name: &str) -> State {
 }
 
 /// A prepared launch: the argv, plus the resolved hypervisor.
+///
+/// Serializable so the daemon can answer `Plan` with the same struct the CLI prints.
+#[derive(serde::Serialize)]
 pub struct Plan {
     pub argv: Vec<String>,
     pub hypervisor: Detected,
@@ -257,6 +260,7 @@ pub fn list(store: &Store) -> Result<Vec<Summary>> {
 }
 
 /// Describe what the machine offers, for `librevm info`.
+#[derive(serde::Serialize)]
 pub struct HostInfo {
     pub hypervisors: Vec<Detected>,
     pub under_hypervisor: bool,
