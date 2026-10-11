@@ -338,6 +338,14 @@ pub fn build_command(
             args.push("--wayland-sock".to_string());
             args.push(sock.display().to_string());
         }
+
+        // A window that takes no input is a picture, not a desktop.
+        //
+        // crosvm forwards nothing from the display window unless asked, so a guest with a
+        // desktop running is visible and completely unusable: the pointer moves on the host
+        // and never arrives. These two flags are the whole difference.
+        args.push("--display-window-keyboard".to_string());
+        args.push("--display-window-mouse".to_string());
     }
 
     // Kernel command line. Force the console parameters the emulated UART needs,
