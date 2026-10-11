@@ -539,6 +539,141 @@ impl Daemon {
         }))
     }
 
+    /// Grow or shrink a disk file.
+    async fn resize_disk(&self, path: String, size_mib: u64) -> String {
+        let result = (|| -> Result<serde_json::Value> {
+            let p = std::path::PathBuf::from(&path);
+            if !p.is_file() {
+                bail!("{} is not a file", p.display());
+            }
+            // Growing is safe; shrinking needs the filesystem inside to have been shrunk
+            // first, which is the caller's business, so it is allowed here.
+            librevm_core::disk::resize(&p, size_mib * 1024 * 1024, true)?;
+            let len = std::fs::metadata(&p)?.len();
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": p.display().to_string(),
+                "size_mib": len / (1024 * 1024),
+            }))
+        })();
+        match result {
+            Ok(v) => to_json(&v),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Put a filesystem on a disk file, replacing whatever was there.
+    async fn format_disk(&self, path: String, filesystem: String) -> String {
+        let result = (|| -> Result<serde_json::Value> {
+            let p = std::path::PathBuf::from(&path);
+            if !p.is_file() {
+                bail!("{} is not a file", p.display());
+            }
+            let fs = if filesystem.is_empty() {
+                "ext4".to_string()
+            } else {
+                filesystem
+            };
+            librevm_core::disk::make_filesystem(&p, &fs)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": p.display().to_string(),
+                "filesystem": fs,
+            }))
+        })();
+        match result {
+            Ok(v) => to_json(&v),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Remove a disk file, refusing if a machine still refers to it.
+    async fn delete_disk(&self, path: String) -> String {
+        let result = (|| -> Result<serde_json::Value> {
+            let p = std::path::PathBuf::from(&path);
+            if !p.is_file() {
+                bail!("{} is not a file", p.display());
+            }
+            // A machine with this disk attached would fail to start afterwards, so say
+            // which one rather than leaving that to be discovered later.
+            let mut users = Vec::new();
+            for name in self.store.list()? {
+                if let Ok(vm) = self.store.load(&name) {
+                    if vm.disks.iter().any(|d| d.path == p) {
+                        users.push(name);
+                    }
+                }
+            }
+            if !users.is_empty() {
+                bail!("still attached to {}", users.join(", "));
+            }
+            std::fs::remove_file(&p)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": p.display().to_string(),
+            }))
+        })();
+        match result {
+            Ok(v) => to_json(&v),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Which machines have a given disk attached.
+    async fn disk_users(&self, path: String) -> String {
+        let p = std::path::PathBuf::from(&path);
+        let mut users = Vec::new();
+        for name in self.store.list().unwrap_or_default() {
+            if let Ok(vm) = self.store.load(&name) {
+                if vm.disks.iter().any(|d| d.path == p) {
+                    users.push(serde_json::json!({
+                        "name": name,
+                        "root": vm.disks.iter().any(|d| d.path == p && d.root),
+                    }));
+                }
+            }
+        }
+        to_json(&serde_json::json!({ "ok": true, "users": users }))
+    }
+
+    /// Everything the images page needs about one disk in a single call.
+    ///
+    /// The page shows a disk's size, its filesystem and who has it attached; asking three
+    /// times for one row would be three round trips.
+    async fn disk_info(&self, path: String) -> String {
+        let p = std::path::PathBuf::from(&path);
+        if !p.is_file() {
+            return error_json(&anyhow::anyhow!("{} is not a file", p.display()));
+        }
+        let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+
+        // The filesystem, from blkid, which reads the superblock without mounting.
+        let fs = std::process::Command::new("blkid")
+            .args(["-o", "value", "-s", "TYPE", &p.display().to_string()])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let mut users = Vec::new();
+        for name in self.store.list().unwrap_or_default() {
+            if let Ok(vm) = self.store.load(&name) {
+                if let Some(d) = vm.disks.iter().find(|d| d.path == p) {
+                    users.push(serde_json::json!({ "name": name, "root": d.root }));
+                }
+            }
+        }
+
+        to_json(&serde_json::json!({
+            "ok": true,
+            "path": p.display().to_string(),
+            "bytes": bytes,
+            "filesystem": fs,
+            "users": users,
+        }))
+    }
+
     /// Remove a machine and everything it owns.
     async fn delete_machine(&self, name: String) -> String {
         let result = (|| -> Result<String> {

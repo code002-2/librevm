@@ -229,10 +229,31 @@ fn fill(window: &adw::ApplicationWindow) {
         .css_classes(["navigation-sidebar"])
         .build();
 
+    // A second list under the machines, for the pages that are not about one machine.
+    // A header toggle was the first attempt and it was too easy to miss.
+    let pages = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::Single)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let disks_row = gtk4::ListBoxRow::builder()
+        .child(
+            &adw::ActionRow::builder()
+                .title(i18n::tr(i18n::Key::DisksPage))
+                .subtitle(i18n::tr(i18n::Key::DisksPageHint))
+                .build(),
+        )
+        .build();
+    pages.append(&disks_row);
+
+    let sidebar_body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    sidebar_body.append(&list);
+    sidebar_body.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+    sidebar_body.append(&pages);
+
     let sidebar_scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
-        .child(&list)
+        .child(&sidebar_body)
         .build();
 
     let empty = adw::StatusPage::builder()
@@ -371,15 +392,41 @@ fn fill(window: &adw::ApplicationWindow) {
         .css_classes(["flat"])
         .build();
 
-    let images_toggle = gtk4::ToggleButton::builder()
-        .icon_name("drive-harddisk-symbolic")
-        .tooltip_text(i18n::tr(i18n::Key::Images))
-        .css_classes(["flat"])
-        .build();
-
     let detail_header = adw::HeaderBar::builder().build();
     detail_header.pack_end(&console_toggle);
-    detail_header.pack_start(&images_toggle);
+
+    // Selecting a machine in the sidebar leaves the disks page.
+    {
+        let pages = pages.clone();
+        let detail_stack = detail_stack.clone();
+        let images_toggle_off = console_toggle.clone();
+        list.connect_row_selected(move |_, row| {
+            if row.is_some() {
+                pages.unselect_all();
+                if detail_stack.visible_child_name().as_deref() == Some("images") {
+                    detail_stack.set_visible_child_name("detail");
+                    images_toggle_off.set_active(false);
+                }
+            }
+        });
+    }
+
+    // And choosing the disks page leaves any machine selected, so the two do not both
+    // look active.
+    {
+        let list = list.clone();
+        let detail_stack = detail_stack.clone();
+        let console_toggle = console_toggle.clone();
+        let images = images.clone();
+        pages.connect_row_selected(move |_, row| {
+            if row.is_some() {
+                list.unselect_all();
+                console_toggle.set_active(false);
+                detail_stack.set_visible_child_name("images");
+                images.reload();
+            }
+        });
+    }
 
     let detail_toolbar = adw::ToolbarView::new();
     detail_toolbar.add_top_bar(&detail_header);
@@ -469,35 +516,6 @@ fn fill(window: &adw::ApplicationWindow) {
         let detail_stack = detail_stack.clone();
         console_toggle.connect_toggled(move |b| {
             detail_stack.set_visible_child_name(if b.is_active() { "console" } else { "detail" });
-        });
-    }
-
-    // The images page. Turning it on refreshes the lists, because what is deployed can
-    // change from outside the window.
-    {
-        let detail_stack = detail_stack.clone();
-        let console_toggle = console_toggle.clone();
-        let images = images.clone();
-        images_toggle.connect_toggled(move |b| {
-            if b.is_active() {
-                // Only one of the two toggles is on at a time.
-                console_toggle.set_active(false);
-                detail_stack.set_visible_child_name("images");
-                images.reload();
-            } else {
-                detail_stack.set_visible_child_name("detail");
-            }
-        });
-    }
-    {
-        // Leaving the images page has to clear its toggle, or the header shows two views
-        // selected at once.
-        let images_toggle = images_toggle.clone();
-        let console_toggle = console_toggle.clone();
-        console_toggle.connect_toggled(move |b| {
-            if b.is_active() {
-                images_toggle.set_active(false);
-            }
         });
     }
 

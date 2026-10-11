@@ -45,11 +45,15 @@ RestrictSUIDSGID=yes
 # crosvm itself gets --disable-sandbox, so the daemon must be able to create the
 # namespaces and devices a VM needs.
 RestrictNamespaces=no
-# /dev/gunyah for crosvm, and /dev/net/tun because the guest network is built on a tap.
-# With DevicePolicy=closed, a device not listed here cannot be opened at all, which is
-# what made `ip tuntap add` fail with EPERM inside the daemon while working from a shell.
+# /dev/gunyah for crosvm, /dev/net/tun because the guest network is built on a tap, and
+# /dev/loop-control with the loop devices because deploying or formatting an image attaches
+# it to one. With DevicePolicy=closed, a device not listed here cannot be opened at all --
+# which is what made `ip tuntap add` fail with EPERM inside the daemon while working from a
+# shell, and later made losetup fail the same way.
 DeviceAllow=/dev/gunyah rw
 DeviceAllow=/dev/net/tun rw
+DeviceAllow=/dev/loop-control rw
+DeviceAllow=block-loop rwm
 DevicePolicy=closed
 # The console hubs spawn crosvm, which wants a good deal of the system.
 SystemCallFilter=@system-service

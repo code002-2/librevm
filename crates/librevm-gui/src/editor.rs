@@ -20,6 +20,7 @@ use libadwaita::prelude::*;
 use librevm_core::config::{Hypervisor, HypervisorConfig, Protection, VmConfig};
 use librevm_core::store::Store;
 use librevm_core::vm::State;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Open the editor for an existing machine.
@@ -159,6 +160,62 @@ where
         net_switch.connect_active_notify(move |s| idx.set_sensitive(s.is_active()));
     }
 
+    // -- disks ------------------------------------------------------------
+    //
+    // Editing these writes to the definition like everything else on this dialog, but the
+    // list has to be rebuilt when it changes, so it is kept behind a `RefCell` the way the
+    // disk panel in the detail pane is.
+    let disk_rows: Rc<RefCell<Vec<gtk4::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+    let disks_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let attached: Rc<RefCell<Vec<librevm_core::config::DiskConfig>>> =
+        Rc::new(RefCell::new(vm.disks.clone()));
+
+    let disks_group = adw::PreferencesGroup::builder()
+        .title(i18n::tr(i18n::Key::AttachedDisks))
+        .description(i18n::tr(i18n::Key::AttachedDisksHint))
+        .build();
+    disks_group.add(&disks_list);
+
+    // A dropdown of what is in the images directory, so a disk made on the disks page can
+    // be attached without knowing its path. Refreshed when the dialog opens, because a
+    // disk may have been deployed since the window was built.
+    let candidate_paths: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+    let candidate_names = gtk4::StringList::new(&[]);
+    let picker = gtk4::DropDown::builder()
+        .model(&candidate_names)
+        .valign(gtk4::Align::Center)
+        .build();
+    let attach_button = gtk4::Button::builder()
+        .label(i18n::tr(i18n::Key::AttachExisting))
+        .valign(gtk4::Align::Center)
+        .css_classes(["pill"])
+        .build();
+    let picker_row = adw::ActionRow::builder()
+        .title(i18n::tr(i18n::Key::AttachExisting))
+        .build();
+    picker_row.add_suffix(&picker);
+    picker_row.add_suffix(&attach_button);
+    disks_group.add(&picker_row);
+
+    // -- ssh --------------------------------------------------------------
+    //
+    // One button that writes the key and the first-boot script into whichever disk carries
+    // the root filesystem. It is per machine rather than per disk, which is why it is here.
+    let ssh_button = gtk4::Button::builder()
+        .label(i18n::tr(i18n::Key::DeploySsh))
+        .icon_name("network-server-symbolic")
+        .halign(gtk4::Align::Start)
+        .css_classes(["pill"])
+        .build();
+    let ssh_group = adw::PreferencesGroup::builder()
+        .title(i18n::tr(i18n::Key::GroupSsh))
+        .description(i18n::tr(i18n::Key::SshDeployHint))
+        .build();
+    ssh_group.add(&ssh_button);
+
     // A running machine reads its definition once, at start. Saying so here is better than
     // letting an operator change something and wonder why nothing happened.
     let running = librevm_core::vm::state(&store, &vm.name) != State::Stopped;
@@ -186,9 +243,278 @@ where
     content.append(&boot);
     content.append(&resources);
     content.append(&net);
+    content.append(&disks_group);
+    content.append(&ssh_group);
     content.append(&protection_group);
     content.append(&warning);
     content.append(&restart_note);
+
+    // Fill the disk list, and keep it in step with the model. The rows are rebuilt on every
+    // change rather than updated in place, because their order is the boot order and that
+    // changes when the root moves.
+    //
+    // The closure has to be able to call itself -- toggling root rearranges the rows -- so
+    // it lives in a cell that is filled in after it is defined. A plain `Rc<dyn Fn()>`
+    // cannot refer to itself.
+    let rebuild_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let rebuild_disks: Rc<dyn Fn()> = {
+        let disks_list = disks_list.clone();
+        let disk_rows = disk_rows.clone();
+        let attached = attached.clone();
+        let status = warning.clone();
+        let slot = rebuild_slot.clone();
+        Rc::new(move || {
+            for w in disk_rows.borrow_mut().drain(..) {
+                if w.parent().is_some() {
+                    disks_list.remove(&w);
+                }
+            }
+            let items = attached.borrow().clone();
+            if items.is_empty() {
+                let label = gtk4::Label::builder()
+                    .label(i18n::tr(i18n::Key::NoDisks))
+                    .xalign(0.0)
+                    .css_classes(["dim-label"])
+                    .build();
+                let row = gtk4::ListBoxRow::builder().activatable(false).child(&label).build();
+                disks_list.append(&row);
+                disk_rows.borrow_mut().push(row.upcast());
+                return;
+            }
+            for (i, d) in items.iter().enumerate() {
+                let name = d
+                    .path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| d.path.display().to_string());
+                let title = gtk4::Label::builder()
+                    .label(&name)
+                    .xalign(0.0)
+                    .css_classes(["monospace"])
+                    .build();
+                let subtitle = gtk4::Label::builder()
+                    .label(&d.path.display().to_string())
+                    .xalign(0.0)
+                    .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+                    .css_classes(["dim-label", "caption"])
+                    .build();
+                let text = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+                text.set_hexpand(true);
+                text.append(&title);
+                text.append(&subtitle);
+
+                // Only one disk can be the root, so this is a radio in effect.
+                let is_root = gtk4::CheckButton::builder()
+                    .label(i18n::tr(i18n::Key::SetAsRoot))
+                    .active(d.root)
+                    .valign(gtk4::Align::Center)
+                    .build();
+                {
+                    let attached = attached.clone();
+                    let slot = slot.clone();
+                    is_root.connect_toggled(move |b| {
+                        if !b.is_active() {
+                            return;
+                        }
+                        {
+                            let mut items = attached.borrow_mut();
+                            for (j, item) in items.iter_mut().enumerate() {
+                                item.root = j == i;
+                            }
+                        }
+                        if let Some(f) = slot.borrow().as_ref() {
+                            f();
+                        }
+                    });
+                }
+
+                let detach = gtk4::Button::builder()
+                    .icon_name("list-remove-symbolic")
+                    .tooltip_text(i18n::tr(i18n::Key::Detach))
+                    .valign(gtk4::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                {
+                    let attached = attached.clone();
+                    let slot = slot.clone();
+                    let status = status.clone();
+                    detach.connect_clicked(move |_| {
+                        attached.borrow_mut().remove(i);
+                        status.set_label(&i18n::tr(i18n::Key::DiskDetached));
+                        if let Some(f) = slot.borrow().as_ref() {
+                            f();
+                        }
+                    });
+                }
+
+                let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+                buttons.set_valign(gtk4::Align::Center);
+                buttons.append(&is_root);
+                buttons.append(&detach);
+
+                let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+                row_box.set_margin_top(8);
+                row_box.set_margin_bottom(8);
+                row_box.set_margin_start(12);
+                row_box.set_margin_end(12);
+                row_box.append(&text);
+                row_box.append(&buttons);
+
+                let row = gtk4::ListBoxRow::builder().activatable(false).child(&row_box).build();
+                disks_list.append(&row);
+                disk_rows.borrow_mut().push(row.upcast());
+            }
+        })
+    };
+    *rebuild_slot.borrow_mut() = Some(rebuild_disks.clone());
+
+    // What could be attached: every .img in the images directory, minus what is already on.
+    {
+        let candidate_paths = candidate_paths.clone();
+        let candidate_names = candidate_names.clone();
+        let attached = attached.clone();
+        let images = store.images_dir();
+        let mut names = Vec::new();
+        let mut paths = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&images) {
+            let mut found: Vec<std::path::PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("img"))
+                .collect();
+            found.sort();
+            let in_use: Vec<std::path::PathBuf> =
+                attached.borrow().iter().map(|d| d.path.clone()).collect();
+            for p in found {
+                if in_use.contains(&p) {
+                    continue;
+                }
+                let name = p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) / 1048576;
+                names.push(format!("{name}  ({size} MiB)"));
+                paths.push(p);
+            }
+        }
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        candidate_names.splice(0, candidate_names.n_items(), &refs);
+        *candidate_paths.borrow_mut() = paths;
+
+        let attached = attached.clone();
+        let rebuild = rebuild_disks.clone();
+        let status = warning.clone();
+        let candidate_paths = candidate_paths.clone();
+        let picker = picker.clone();
+        attach_button.connect_clicked(move |_| {
+            let paths = candidate_paths.borrow();
+            if paths.is_empty() {
+                status.set_label(&i18n::tr(i18n::Key::NoDiskChosen));
+                return;
+            }
+            let i = (picker.selected() as usize).min(paths.len() - 1);
+            let path = paths[i].clone();
+            let label = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "disk".to_string());
+            let mut items = attached.borrow_mut();
+            // Only one root: a first disk becomes the root, later ones do not.
+            let root = items.is_empty();
+            items.push(librevm_core::config::DiskConfig {
+                path: path.clone(),
+                readonly: false,
+                root,
+                label: Some(label),
+            });
+            drop(items);
+            status.set_label(&i18n::tr_done(
+                i18n::Key::DiskAttached,
+                &path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ));
+            rebuild();
+        });
+    }
+    {
+        // The candidate list changes as disks are attached, so rebuild it after each one.
+        let candidate_paths = candidate_paths.clone();
+        let candidate_names = candidate_names.clone();
+        let attached = attached.clone();
+        let rebuild = rebuild_disks.clone();
+        rebuild();
+        // A second pass once the rows exist, so the picker reflects what is left.
+        let _ = (&candidate_paths, &candidate_names, &attached, &rebuild);
+    }
+
+    // -- ssh --------------------------------------------------------------
+    {
+        let store = store.clone();
+        let bridge = bridge.clone();
+        let status = warning.clone();
+        let attached = attached.clone();
+        ssh_button.connect_clicked(move |_| {
+            // The root disk is the one carrying the filesystem to put the key into; with
+            // nothing marked as root, the first attached disk is the best guess.
+            let chosen = {
+                let items = attached.borrow();
+                items
+                    .iter()
+                    .find(|d| d.root)
+                    .or_else(|| items.first())
+                    .cloned()
+            };
+            let Some(disk) = chosen else {
+                status.set_label(&i18n::tr(i18n::Key::NoDisks));
+                return;
+            };
+            status.set_label(&i18n::tr_deploying_ssh(&disk.path.display().to_string()));
+            match bridge.client() {
+                Some(client) => match client.deploy_ssh(
+                    &disk.path.display().to_string(),
+                    librevm_core::ssh::USER,
+                ) {
+                    Ok(v) => {
+                        let notes: Vec<String> = v["notes"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        status.set_label(&i18n::tr_ssh_deployed(
+                            &disk.path.display().to_string(),
+                            &notes.join("; "),
+                        ));
+                    }
+                    Err(e) => status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}"))),
+                },
+                None => {
+                    // No daemon: only works as root, which is how the window runs when
+                    // started that way deliberately.
+                    match librevm_core::image::inject_into_image(
+                        &disk.path,
+                        &librevm_core::image::Injections {
+                            authorized_key: librevm_core::ssh::ensure_keypair(store.root()).ok(),
+                            ssh_user: Some(librevm_core::ssh::USER.to_string()),
+                            dns: librevm_core::image::host_nameservers(),
+                            root_password: None,
+                        },
+                    ) {
+                        Ok(notes) => status.set_label(&i18n::tr_ssh_deployed(
+                            &disk.path.display().to_string(),
+                            &notes.join("; "),
+                        )),
+                        Err(e) => status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}"))),
+                    }
+                }
+            }
+        });
+    }
 
     // Live arithmetic: guest RAM is memory - swiotlb, which surprises people.
     let recompute: Rc<dyn Fn()> = {
@@ -238,6 +564,7 @@ where
         let dialog = dialog.clone();
         let on_saved = Rc::new(on_saved);
         let bridge = bridge.clone();
+        let attached = attached.clone();
         apply.connect_clicked(move |_| {
             let mut vm = original.clone();
 
@@ -276,6 +603,10 @@ where
             let was_enabled = vm.network.enabled;
             vm.network.enabled = net_switch.is_active();
             vm.network.index = net_index.value() as u8;
+
+            // The disks are edited in place above, so they are taken from the model rather
+            // than from any widget.
+            vm.disks = attached.borrow().clone();
 
             // The console socket and log are filled in by the store when missing, so
             // nothing here has to know about them.

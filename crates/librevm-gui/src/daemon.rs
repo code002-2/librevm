@@ -173,6 +173,28 @@ impl Client {
         self.call("DeploySsh", &(image, user))
     }
 
+    pub fn resize_disk(&self, path: &str, size_mib: u64) -> Result<Value> {
+        self.call("ResizeDisk", &(path, size_mib))
+    }
+
+    pub fn format_disk(&self, path: &str, filesystem: &str) -> Result<Value> {
+        self.call("FormatDisk", &(path, filesystem))
+    }
+
+    pub fn delete_disk(&self, path: &str) -> Result<Value> {
+        self.call("DeleteDisk", &(path,))
+    }
+
+    /// Which machines have this disk attached.
+    pub fn disk_users(&self, path: &str) -> Result<Value> {
+        self.call("DiskUsers", &(path,))
+    }
+
+    /// Size, filesystem and users, in one call.
+    pub fn disk_info(&self, path: &str) -> Result<Value> {
+        self.call("DiskInfo", &(path,))
+    }
+
     pub fn delete_machine(&self, name: &str) -> Result<String> {
         self.acted("DeleteMachine", &(name,))
     }

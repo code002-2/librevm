@@ -478,7 +478,10 @@ fn deploy_dialog(
     window
 }
 
-/// A row for a deployed image, with the one-click SSH button.
+/// A row for a deployed image, with the operations that act on a disk file.
+///
+/// SSH setup is not here. It belongs to a machine rather than to a disk -- the key and the
+/// first-boot script are per machine -- so it lives in that machine's settings.
 fn deployed_row(
     entry: &DeployedEntry,
     bridge: &crate::daemon::Bridge,
@@ -500,15 +503,28 @@ fn deployed_row(
     text.append(&title);
     text.append(&subtitle);
 
-    // The one-click part. It mounts the image, installs the key and the first-boot
-    // script, and unmounts, without rebuilding anything.
-    let ssh = gtk4::Button::builder()
-        .label(i18n::tr(i18n::Key::DeploySsh))
-        .icon_name("network-server-symbolic")
+    let resize = gtk4::Button::builder()
+        .label(i18n::tr(i18n::Key::Resize))
         .valign(gtk4::Align::Center)
-        .tooltip_text(i18n::tr(i18n::Key::SshDeployHint))
         .css_classes(["pill"])
         .build();
+    let format = gtk4::Button::builder()
+        .label(i18n::tr(i18n::Key::Format))
+        .valign(gtk4::Align::Center)
+        .css_classes(["pill"])
+        .build();
+    let delete = gtk4::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text(i18n::tr(i18n::Key::DeleteDisk))
+        .valign(gtk4::Align::Center)
+        .css_classes(["pill", "destructive-action"])
+        .build();
+
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    buttons.set_valign(gtk4::Align::Center);
+    buttons.append(&resize);
+    buttons.append(&format);
+    buttons.append(&delete);
 
     let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     row_box.set_margin_top(10);
@@ -516,32 +532,144 @@ fn deployed_row(
     row_box.set_margin_start(12);
     row_box.set_margin_end(12);
     row_box.append(&text);
-    row_box.append(&ssh);
+    row_box.append(&buttons);
 
+    // -- resize -----------------------------------------------------------
+    {
+        let path = entry.path.clone();
+        let bridge = bridge.clone();
+        let status = status.clone();
+        let current = entry.bytes.max(1024 * 1024) / 1048576;
+        resize.connect_clicked(move |button| {
+            let window = button.root().and_downcast::<adw::Window>();
+            let dialog = adw::MessageDialog::new(
+                window.as_ref(),
+                Some(&i18n::tr(i18n::Key::Resize)),
+                None,
+            );
+            let row = adw::EntryRow::builder()
+                .title(i18n::tr(i18n::Key::NewSize))
+                .text(format!("{current}M"))
+                .build();
+            let group = adw::PreferencesGroup::new();
+            group.add(&row);
+            dialog.set_extra_child(Some(&group));
+            dialog.add_response("cancel", &i18n::tr(i18n::Key::Cancel));
+            dialog.add_response("go", &i18n::tr(i18n::Key::Resize));
+            dialog.set_response_appearance("go", adw::ResponseAppearance::Suggested);
+            let bridge = bridge.clone();
+            let status = status.clone();
+            let path = path.clone();
+            dialog.connect_response(None, move |d, response| {
+                if response == "go" {
+                    let mib = parse_mib(&row.text());
+                    if mib > 0 {
+                        match bridge.client() {
+                            Some(c) => match c.resize_disk(&path, mib) {
+                                Ok(_) => status.set_label(&i18n::tr_done(
+                                    i18n::Key::DiskResized,
+                                    &format!("{mib} MiB"),
+                                )),
+                                Err(e) => {
+                                    status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}")))
+                                }
+                            },
+                            None => status.set_label(i18n::tr(i18n::Key::NoDaemon)),
+                        }
+                    }
+                }
+                d.close();
+            });
+            dialog.present();
+        });
+    }
+
+    // -- format -----------------------------------------------------------
+    {
+        let path = entry.path.clone();
+        let bridge = bridge.clone();
+        let status = status.clone();
+        format.connect_clicked(move |button| {
+            let window = button.root().and_downcast::<adw::Window>();
+            let dialog = adw::MessageDialog::new(
+                window.as_ref(),
+                Some(&i18n::tr(i18n::Key::Format)),
+                Some(&i18n::tr(i18n::Key::FormatWarning)),
+            );
+            // A dropdown rather than free text, because the only values that work are the
+            // ones mkfs knows.
+            let list = gtk4::StringList::new(&["ext4", "ext2", "vfat", "xfs", "btrfs"]);
+            let dropdown = gtk4::DropDown::builder().model(&list).selected(0).build();
+            let group = adw::PreferencesGroup::new();
+            let row = adw::ActionRow::builder()
+                .title(i18n::tr(i18n::Key::Filesystem))
+                .build();
+            row.add_suffix(&dropdown);
+            group.add(&row);
+            dialog.set_extra_child(Some(&group));
+            dialog.add_response("cancel", &i18n::tr(i18n::Key::Cancel));
+            dialog.add_response("go", &i18n::tr(i18n::Key::Format));
+            dialog.set_response_appearance("go", adw::ResponseAppearance::Destructive);
+            let bridge = bridge.clone();
+            let status = status.clone();
+            let path = path.clone();
+            dialog.connect_response(None, move |d, response| {
+                if response == "go" {
+                    let fs = ["ext4", "ext2", "vfat", "xfs", "btrfs"]
+                        [dropdown.selected().min(4) as usize]
+                        .to_string();
+                    match bridge.client() {
+                        Some(c) => match c.format_disk(&path, &fs) {
+                            Ok(_) => status.set_label(&i18n::tr_done(
+                                i18n::Key::DiskFormatted,
+                                &fs,
+                            )),
+                            Err(e) => status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}"))),
+                        },
+                        None => status.set_label(i18n::tr(i18n::Key::NoDaemon)),
+                    }
+                }
+                d.close();
+            });
+            dialog.present();
+        });
+    }
+
+    // -- delete -----------------------------------------------------------
     {
         let path = entry.path.clone();
         let bridge = bridge.clone();
         let status = status.clone();
         let name = entry.name.clone();
-        ssh.connect_clicked(move |_| {
-            status.set_label(&i18n::tr_deploying_ssh(&name));
-            match bridge.client() {
-                Some(client) => match client.deploy_ssh(&path, librevm_core::ssh::USER) {
-                    Ok(v) => {
-                        let notes: Vec<String> = v["notes"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        status.set_label(&i18n::tr_ssh_deployed(&name, &notes.join("; ")));
+        delete.connect_clicked(move |button| {
+            let window = button.root().and_downcast::<adw::Window>();
+            let dialog = adw::MessageDialog::new(
+                window.as_ref(),
+                Some(&i18n::tr(i18n::Key::ConfirmDelete)),
+                Some(&i18n::tr(i18n::Key::ConfirmDeleteBody)),
+            );
+            dialog.set_body_use_markup(true);
+            dialog.add_response("cancel", &i18n::tr(i18n::Key::Cancel));
+            dialog.add_response("go", &i18n::tr(i18n::Key::DeleteDisk));
+            dialog.set_response_appearance("go", adw::ResponseAppearance::Destructive);
+            let bridge = bridge.clone();
+            let status = status.clone();
+            let path = path.clone();
+            let name = name.clone();
+            dialog.connect_response(None, move |d, response| {
+                if response == "go" {
+                    match bridge.client() {
+                        // The daemon refuses if a machine still has it, and says which.
+                        Some(c) => match c.delete_disk(&path) {
+                            Ok(_) => status.set_label(&i18n::tr_done(i18n::Key::DiskDeleted, &name)),
+                            Err(e) => status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}"))),
+                        },
+                        None => status.set_label(i18n::tr(i18n::Key::NoDaemon)),
                     }
-                    Err(e) => status.set_label(&i18n::tr_deploy_failed(&format!("{e:#}"))),
-                },
-                None => status.set_label(i18n::tr(i18n::Key::NoDaemon)),
-            }
+                }
+                d.close();
+            });
+            dialog.present();
         });
     }
 

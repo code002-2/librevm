@@ -211,6 +211,32 @@ pub enum Key {
     MirrorDefault,
     DeploySsh,
     SshDeployHint,
+
+    // -- the disks page ---------------------------------------------------
+    DisksPage,
+    DisksPageHint,
+    Resize,
+    Format,
+    DeleteDisk,
+    DiskResized,
+    DiskFormatted,
+    DiskDeleted,
+    ConfirmDelete,
+    ConfirmDeleteBody,
+    NewSize,
+    Filesystem,
+    NoFilesystem,
+    AttachedTo,
+    FormatWarning,
+    AttachedDisks,
+    AttachedDisksHint,
+    AttachExisting,
+    NoDiskChosen,
+    DiskAttached,
+    DiskDetached,
+    SetAsRoot,
+    Available,
+    GroupSsh,
 }
 
 impl Key {
@@ -356,6 +382,33 @@ impl Key {
                 "Installs the key and a first-boot script that starts sshd. Needs no rebuild."
             }
             Key::Refresh => "Refresh",
+
+            Key::DisksPage => "Disks",
+            Key::DisksPageHint => "Images and disk files",
+            Key::Resize => "Resize",
+            Key::Format => "Format",
+            Key::DeleteDisk => "Delete",
+            Key::DiskResized => "Resized",
+            Key::DiskFormatted => "Formatted",
+            Key::DiskDeleted => "Deleted",
+            Key::ConfirmDelete => "Delete this disk?",
+            Key::ConfirmDeleteBody => "The file is removed. This cannot be undone.",
+            Key::NewSize => "New size",
+            Key::Filesystem => "Filesystem",
+            Key::NoFilesystem => "leave as is",
+            Key::AttachedTo => "Attached to",
+            Key::FormatWarning => {
+                "This replaces everything on the disk. There is no undo."
+            }
+            Key::AttachedDisks => "Disks",
+            Key::AttachedDisksHint => "Attached to this machine, in the order they appear.",
+            Key::AttachExisting => "Attach a disk",
+            Key::NoDiskChosen => "no disks available in the images directory",
+            Key::DiskAttached => "Attached",
+            Key::DiskDetached => "Detached",
+            Key::SetAsRoot => "root",
+            Key::Available => "available",
+            Key::GroupSsh => "SSH",
         }
     }
 
@@ -487,6 +540,31 @@ impl Key {
             Key::DeploySsh => "部署 SSH",
             Key::SshDeployHint => "写入公钥和首启脚本（会启动 sshd），无需重建镜像。",
             Key::Refresh => "刷新",
+
+            Key::DisksPage => "磁盘",
+            Key::DisksPageHint => "镜像与磁盘文件",
+            Key::Resize => "改大小",
+            Key::Format => "格式化",
+            Key::DeleteDisk => "删除",
+            Key::DiskResized => "已调整",
+            Key::DiskFormatted => "已格式化",
+            Key::DiskDeleted => "已删除",
+            Key::ConfirmDelete => "删除这个磁盘？",
+            Key::ConfirmDeleteBody => "会删掉文件，无法撤销。",
+            Key::NewSize => "新容量",
+            Key::Filesystem => "文件系统",
+            Key::NoFilesystem => "保持不变",
+            Key::AttachedTo => "已挂到",
+            Key::FormatWarning => "会覆盖磁盘上的一切，无法撤销。",
+            Key::AttachedDisks => "磁盘",
+            Key::AttachedDisksHint => "挂在这台虚拟机上的磁盘，按启动顺序排列。",
+            Key::AttachExisting => "挂载磁盘",
+            Key::NoDiskChosen => "镜像目录里还没有磁盘",
+            Key::DiskAttached => "已挂载",
+            Key::DiskDetached => "已卸载",
+            Key::SetAsRoot => "根设备",
+            Key::Available => "可用",
+            Key::GroupSsh => "SSH",
         }
     }
 }
@@ -557,6 +635,15 @@ pub fn tr_ssh_deployed(name: &str, notes: &str) -> String {
     match current() {
         Lang::En => format!("{name}: {notes}"),
         Lang::Zh => format!("{name}：{notes}"),
+    }
+}
+
+/// "Resized: 4096 MiB" and its siblings, where the key already says what happened.
+pub fn tr_done(key: Key, detail: &str) -> String {
+    let verb = tr(key);
+    match current() {
+        Lang::En => format!("{verb}: {detail}"),
+        Lang::Zh => format!("{verb}：{detail}"),
     }
 }
 
