@@ -392,36 +392,38 @@ fn fill(window: &adw::ApplicationWindow) {
         .css_classes(["flat"])
         .build();
 
+    // Shared with the callbacks below, which drive this toggle and are driven by it.
+    let switching = Rc::new(std::cell::Cell::new(false));
+
     let detail_header = adw::HeaderBar::builder().build();
     detail_header.pack_end(&console_toggle);
 
     // Selecting a machine in the sidebar leaves the disks page.
+    //
+    // Both of these used to reach into the other list and clear it, and to flip the other
+    // toggle. That is a closed loop -- clearing a selection emits `row-selected`, and
+    // changing a toggle's active state from inside a handler for that same toggle trips a
+    // GTK assertion about its accounting -- and it took the window down when the disks
+    // entry was clicked. Driving only the stack and leaving each list to its own handler
+    // breaks the loop: a selection in one list does not need the other one cleared, because
+    // the stack can only show one page anyway.
     {
-        let pages = pages.clone();
         let detail_stack = detail_stack.clone();
-        let images_toggle_off = console_toggle.clone();
+        let images = images.clone();
         list.connect_row_selected(move |_, row| {
-            if row.is_some() {
-                pages.unselect_all();
-                if detail_stack.visible_child_name().as_deref() == Some("images") {
-                    detail_stack.set_visible_child_name("detail");
-                    images_toggle_off.set_active(false);
-                }
+            if row.is_some() && detail_stack.visible_child_name().as_deref() == Some("images") {
+                detail_stack.set_visible_child_name("detail");
             }
+            // The page is reloaded when it is shown, not when a machine is picked.
+            let _ = &images;
         });
     }
 
-    // And choosing the disks page leaves any machine selected, so the two do not both
-    // look active.
     {
-        let list = list.clone();
         let detail_stack = detail_stack.clone();
-        let console_toggle = console_toggle.clone();
         let images = images.clone();
         pages.connect_row_selected(move |_, row| {
             if row.is_some() {
-                list.unselect_all();
-                console_toggle.set_active(false);
                 detail_stack.set_visible_child_name("images");
                 images.reload();
             }
@@ -514,19 +516,33 @@ fn fill(window: &adw::ApplicationWindow) {
 
     {
         let detail_stack = detail_stack.clone();
+        let switching = switching.clone();
         console_toggle.connect_toggled(move |b| {
+            // Set by the callback above while it is driving this toggle, so that the round
+            // trip through here does not look like a fresh user action.
+            if switching.get() {
+                return;
+            }
             detail_stack.set_visible_child_name(if b.is_active() { "console" } else { "detail" });
         });
     }
 
-    // The detail pane's Console button switches this same stack, so both ways in
-    // land on the console view.
+    // The detail pane's Console button switches this same stack, so both ways in land on
+    // the console view. Guarded against re-entry: `set_active` runs the toggled handler
+    // above, which sets the stack again, and GTK objects if a toggle's state is changed
+    // while it is already handling a change of that state.
     {
         let detail_stack = detail_stack.clone();
         let console_toggle = console_toggle.clone();
+        let switching = Rc::new(std::cell::Cell::new(false));
         view.on_console(move || {
+            if switching.get() {
+                return;
+            }
+            switching.set(true);
             detail_stack.set_visible_child_name("console");
             console_toggle.set_active(true);
+            switching.set(false);
         });
     }
 
