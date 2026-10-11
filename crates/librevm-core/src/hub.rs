@@ -262,6 +262,28 @@ pub fn run(store: &Store, name: &str) -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("listening on {}", socket_path.display()))?;
+
+    // The socket has to be group writable, or the window cannot connect to it.
+    //
+    // `bind` creates it with 0777 minus the umask, which for a root process is usually 0755
+    // -- group read and execute but not write. Connecting to a Unix socket is a write, so
+    // the desktop user, who is in the `librevm` group precisely so it can do this, is
+    // refused with EACCES. A `chmod` after the fact in the unit does not help either: the
+    // socket does not exist until a hub is started, which is long after the unit's own
+    // start-up commands have run.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o660);
+        if let Err(e) = std::fs::set_permissions(&socket_path, mode) {
+            log::warn!(
+                "{name}: could not make {} group writable ({e}); the window may not be able \
+                 to reach the console",
+                socket_path.display()
+            );
+        }
+    }
+
     log::info!("{name}: console listening on {}", socket_path.display());
 
     let log_path = store.console_log(name);
