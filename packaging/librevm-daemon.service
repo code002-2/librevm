@@ -30,7 +30,7 @@ StateDirectory=librevm
 StateDirectoryMode=2775
 LogsDirectory=librevm
 LogsDirectoryMode=2775
-ExecStartPost=/bin/sh -c 'chgrp -R librevm /var/lib/librevm /run/librevm 2>/dev/null; chmod -R g+rwX /var/lib/librevm /run/librevm 2>/dev/null; exit 0'
+ExecStartPost=/bin/sh -c 'chgrp -R librevm /var/lib/librevm /run/librevm 2>/dev/null; chmod -R g+rwX /var/lib/librevm /run/librevm 2>/dev/null; chmod -R g-rwx,o-rwx /var/lib/librevm/ssh 2>/dev/null; chmod 600 /var/lib/librevm/ssh/librevm_ed25519* 2>/dev/null; chmod 700 /var/lib/librevm/ssh 2>/dev/null; exit 0'
 
 # A daemon that walks a store and runs crosvm does not need the rest of the machine.
 NoNewPrivileges=yes

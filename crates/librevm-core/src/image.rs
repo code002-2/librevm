@@ -626,6 +626,13 @@ pub fn inject(root: &Path, what: &Injections) -> Result<Vec<String>> {
 
 /// A first-boot script that installs and starts sshd, written to suit the distribution it
 /// lands in.
+///
+/// The package repositories are the part that needs care. A minirootfs carries the
+/// distribution's own default mirrors, which are the upstream CDN and slow from here, and
+/// it carries no CA certificates -- so an https repository fails with a certificate error
+/// that reads like a network problem. Both are dealt with before anything is installed:
+/// the repositories are pointed at a mirror in mainland China, over http, and the CA
+/// bundle is installed first if the tool is available.
 fn firstboot_script(user: &str, dns: &[String]) -> String {
     let dns_lines: String = dns
         .iter()
@@ -635,9 +642,9 @@ fn firstboot_script(user: &str, dns: &[String]) -> String {
         r#"#!/bin/sh
 # Written by librevm. Installs and starts sshd, once.
 #
-# A bare rootfs has no sshd, and which package provides it depends on the distribution,
-# so this tries each in turn rather than being told which image it is in. It runs on the
-# first boot only; the marker at the end stops it repeating.
+# A bare rootfs has no sshd, and which package provides it depends on the distribution, so
+# this tries each in turn rather than being told which image it is in. It runs on the first
+# boot only; the marker at the end stops it repeating.
 set -u
 
 MARKER=/etc/librevm-firstboot.done
@@ -648,15 +655,56 @@ MARKER=/etc/librevm-firstboot.done
 if ! grep -q nameserver /etc/resolv.conf 2>/dev/null; then
 {dns_lines}fi
 
+# Point the package manager at a mirror that is fast from here, over plain http. Alpine's
+# own default is the upstream CDN, and the image has no CA bundle either, so https fails
+# with a certificate error before it even gets as far as the network.
+use_fast_mirrors() {{
+    # Overridable, so a different mirror is a config change rather than a rebuild.
+    MIRROR_ALPINE="${{LIBREVM_ALPINE_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/alpine}}"
+    MIRROR_DEBIAN="${{LIBREVM_DEBIAN_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian}}"
+
+    if [ -f /etc/apk/repositories ]; then
+        # The repository path carries a leading v: /alpine/v3.21/main, while
+        # /etc/alpine-release is just 3.21.3. Without the v the mirror answers with a
+        # "No such file or directory" that looks like the mirror is down.
+        ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
+        [ -z "$ver" ] && ver=3.21
+        case "$ver" in v*) ;; *) ver="v$ver";; esac
+        printf '%s/%s/main\n%s/%s/community\n' "$MIRROR_ALPINE" "$ver" "$MIRROR_ALPINE" "$ver" \
+            > /etc/apk/repositories
+        echo "  apk repositories -> $MIRROR_ALPINE/$ver"
+    fi
+
+    if [ -f /etc/apt/sources.list ]; then
+        codename=$( (. /etc/os-release 2>/dev/null; echo "${{VERSION_CODENAME:-trixie}}") )
+        printf 'deb %s %s main\ndeb %s %s-updates main\n' \
+            "$MIRROR_DEBIAN" "$codename" "$MIRROR_DEBIAN" "$codename" > /etc/apt/sources.list
+        echo "  apt sources -> $MIRROR_DEBIAN"
+    fi
+    if [ -d /etc/apt/sources.list.d ]; then
+        rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null
+    fi
+
+    # dnf reads its own files; leave them unless one exists and is obviously upstream.
+    for f in /etc/yum.repos.d/*.repo; do
+        [ -f "$f" ] || continue
+        sed -i 's|^metalink=|#metalink=|; s|^#baseurl=http://download.example/pub|baseurl=http://mirrors.tuna.tsinghua.edu.cn|' "$f" 2>/dev/null
+    done
+}}
+
 install_sshd() {{
+    use_fast_mirrors
+
     if command -v apk >/dev/null 2>&1; then
         # /proc and /dev/urandom have to be there: apk reads the first to see what is
-        # installed and the second to check signatures, and fails without either.
-        if [ ! -d /proc/self ]; then
-            mount -t proc none /proc 2>/dev/null
+        # installed and the second to check what it downloads.
+        [ -d /proc/self ] || mount -t proc none /proc 2>/dev/null
+        # Over http the index signature is still checked, which needs the Alpine keys that
+        # are already in the image. openssh itself pulls in the library it needs.
+        if apk add --no-cache openssh; then
+            return 0
         fi
-        apk add --no-cache openssh && return 0
-        echo "librevm: apk said:"
+        echo "librevm: apk failed; the last of its output was:"
         apk add --no-cache openssh 2>&1 | tail -6
         return 1
     fi

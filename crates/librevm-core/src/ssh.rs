@@ -77,6 +77,18 @@ pub fn ensure_keypair(store_root: &Path) -> Result<String> {
         }
     }
 
+    // ssh refuses to use a key anyone else can read, and a `chmod -R g+rwX` over the store
+    // is exactly the kind of thing that widens this one by accident. Setting it here means
+    // the file is correct whenever it is used, whatever happened to it in between.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).ok();
+        // The public key is not a secret, but there is no reason for it to be group
+        // writable either.
+        std::fs::set_permissions(public_key(store_root), std::fs::Permissions::from_mode(0o644)).ok();
+    }
+
     std::fs::read_to_string(public_key(store_root))
         .with_context(|| format!("reading {}", public_key(store_root).display()))
         .map(|s| s.trim().to_string())
