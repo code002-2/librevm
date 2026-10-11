@@ -5,17 +5,19 @@ Name=librevm
 GenericName=Virtual Machine Manager
 Comment=Create and run virtual machines, with Gunyah support
 Comment[zh_CN]=创建并运行虚拟机，支持 Gunyah
-Exec=/usr/local/bin/librevm-gui-session
-TryExec=/usr/local/bin/librevm-gui
+# Bare command names, resolved through PATH, rather than an absolute path. The launcher
+# lives in /usr/local/bin when installed by hand from a build tree and in /usr/bin when
+# installed from the package, and hardcoding one makes the entry invisible on the other:
+# GNOME hides an application whose TryExec does not exist, so the launcher simply
+# disappears from the app grid with no explanation.
+Exec=librevm-gui-session
+TryExec=librevm-gui
 Icon=librevm
 Terminal=false
 Categories=System;Emulator;
 Keywords=vm;virtual;machine;gunyah;crosvm;
 Keywords[zh_CN]=虚拟机;gunyah;crosvm;
-# No StartupWMClass on purpose. The GUI runs as root and therefore cannot own its
-# name on the desktop user's session bus, so the shell can never activate a running
-# instance. Claiming a window class here would make the shell believe the
-# application is already up and it would send an activation request into the void
-# instead of starting the process -- a second click on the icon would do nothing.
-# Leaving the association out means every click starts the launcher.
+# No StartupWMClass on purpose. Every click should start the launcher, and claiming a
+# window class makes the shell believe the application is already running, so a second
+# click sends an activation request into the void instead of starting it.
 StartupNotify=false
