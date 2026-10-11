@@ -1,0 +1,20 @@
+[package]
+name = "librevm-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command line interface for librevm"
+
+[[bin]]
+name = "librevm"
+path = "src/main.rs"
+
+[dependencies]
+librevm-core.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
+libc.workspace = true
+nix.workspace = true

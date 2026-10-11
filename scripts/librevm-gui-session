@@ -1,0 +1,132 @@
+#!/bin/sh
+# Start librevm-gui inside the running desktop session.
+#
+# Two environments matter here.
+#
+# When the shell starts us we already have the right display and bus, because we
+# inherit them. When a terminal starts us as root we do not, so they are read from
+# the compositor's own environment. Several processes match and they do not all
+# carry the same variables, so candidates are scored -- and a candidate only counts
+# if the display it names actually exists. A root session with
+# XDG_RUNTIME_DIR=/run/user/0 wins on score and then cannot open a display at all.
+# The bus address copied from another process carries that connection's guid, which
+# cannot be reused, so the guid is stripped.
+#
+# Logging must never be able to kill the launch: the shell runs this as the desktop
+# user, and a root-owned log file cannot be appended to by that user. Test first,
+# and fall back to somewhere always writable.
+PREFERRED=/var/log/librevm-gui.log
+FALLBACK=/tmp/librevm-gui.log
+
+if ( : >> "$PREFERRED" ) 2>/dev/null; then
+    LOG=$PREFERRED
+else
+    LOG=$FALLBACK
+fi
+
+# The binary lives in /usr/bin when installed from a package and in /usr/local/bin
+# when installed by hand from a build tree. Neither is hardcoded, so one script
+# covers both.
+GUI=
+for c in /usr/bin/librevm-gui /usr/local/bin/librevm-gui; do
+    [ -x "$c" ] && { GUI=$c; break; }
+done
+ROOT_HELPER=
+for c in /usr/bin/librevm-gui-session-root /usr/local/bin/librevm-gui-session-root; do
+    [ -x "$c" ] && { ROOT_HELPER=$c; break; }
+done
+
+if [ -z "$GUI" ]; then
+    echo "librevm-gui was not found in /usr/bin or /usr/local/bin" >&2
+    exit 1
+fi
+
+log() {
+    { echo "$@"; } >> "$LOG" 2>/dev/null || true
+}
+
+log ""
+log "================================================================"
+log "== launcher entered $(date -Iseconds) uid=$(id -u)"
+log "== env DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+
+pick() {
+    best_pid=
+    best_score=-1
+    for p in $(pgrep -f 'gnome-shell|mutter' 2>/dev/null); do
+        [ -r "/proc/$p/environ" ] || continue
+        rt=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^XDG_RUNTIME_DIR=//p')
+        wl=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p')
+        dp=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p')
+        usable=no
+        if [ -n "$rt" ] && [ -n "$wl" ] && [ -S "$rt/$wl" ]; then
+            usable=yes
+        elif [ -n "$dp" ] && [ -S "/tmp/.X11-unix/X${dp#:}" ]; then
+            usable=yes
+        fi
+        [ "$usable" = yes ] || continue
+        score=0
+        for var in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
+                   DBUS_SESSION_BUS_ADDRESS XAUTHORITY; do
+            tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q "^$var=" && score=$((score + 1))
+        done
+        if [ "$score" -gt "$best_score" ]; then
+            best_score=$score
+            best_pid=$p
+        fi
+    done
+    echo "$best_pid"
+}
+
+have_display=no
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+    have_display=yes
+elif [ -n "${DISPLAY:-}" ] && [ -S "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
+    have_display=yes
+fi
+
+best_pid=
+if [ "$have_display" = no ]; then
+    best_pid=$(pick)
+    log "== no usable display of our own; picked ${best_pid:-none}"
+else
+    log "== inherited a usable display"
+fi
+
+if [ -n "$best_pid" ]; then
+    for var in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE XAUTHORITY; do
+        val=$(tr '\0' '\n' < "/proc/$best_pid/environ" 2>/dev/null | sed -n "s/^$var=//p")
+        [ -n "$val" ] && export "$var=$val"
+    done
+    bus=$(tr '\0' '\n' < "/proc/$best_pid/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+    if [ -n "$bus" ]; then
+        bus=$(printf '%s' "$bus" | sed 's/,guid=[^,]*//')
+        export DBUS_SESSION_BUS_ADDRESS="$bus"
+    fi
+fi
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR=/run/user/1000
+fi
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR}/wayland-0" ]; then
+    export WAYLAND_DISPLAY=wayland-0
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR}/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+fi
+
+# The GUI needs root to open /dev/gunyah and run a guest; the desktop user cannot.
+# If we are not root, hand over with the display and bus environment intact.
+if [ "$(id -u)" != 0 ]; then
+    if [ -n "$ROOT_HELPER" ] && sudo -n "$ROOT_HELPER" "$@" >/dev/null 2>&1; then
+        exit 0
+    fi
+    log "== not root and sudo was refused; carrying on as $(id -u)"
+fi
+
+log "== final DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-} uid=$(id -u)"
+
+export GDK_BACKEND=wayland,x11
+export NO_AT_BRIDGE=1
+
+exec "$GUI" "$@" >> "$LOG" 2>&1
