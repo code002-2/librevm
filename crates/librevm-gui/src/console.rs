@@ -312,7 +312,7 @@ impl ConsoleView {
         // Ctrl+Shift+C copies, which is the convention for a terminal.
         {
             let buffer = buffer.clone();
-            let view = view.clone();
+            let view_for_copy = view.clone();
             let controller = gtk4::EventControllerKey::new();
             controller.connect_key_pressed(move |_, key, _, state| {
                 if state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
@@ -320,9 +320,8 @@ impl ConsoleView {
                     && key == gtk4::gdk::Key::C
                 {
                     if let Some((start, end)) = buffer.selection_bounds() {
-                        if let Some(text) = buffer.text(&start, &end, false).map(|s| s.to_string()) {
-                            view.clipboard().set_text(&text);
-                        }
+                        let text = buffer.text(&start, &end, false).to_string();
+                        view_for_copy.clipboard().set_text(&text);
                     }
                     return glib::Propagation::Stop;
                 }
@@ -505,11 +504,8 @@ impl ConsoleView {
         if let Some(bg) = bg {
             tag.set_background(Some(&bg));
         }
-        tag.set_weight(if key.bold {
-            gtk4::pango::Weight::Bold
-        } else {
-            gtk4::pango::Weight::Normal
-        });
+        // pango takes a numeric weight, not the enum, in this binding
+        tag.set_weight(if key.bold { 700 } else { 400 });
         tag.set_style(if key.italic {
             gtk4::pango::Style::Italic
         } else {

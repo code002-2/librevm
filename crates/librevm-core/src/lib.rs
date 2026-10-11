@@ -6,6 +6,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod disk;
 pub mod hub;
 pub mod store;
 pub mod vm;

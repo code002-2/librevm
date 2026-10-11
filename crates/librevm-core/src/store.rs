@@ -81,8 +81,21 @@ impl Store {
         self.vm_dir(name).join("disks")
     }
 
+    /// Where images shared between machines live.
+    ///
+    /// Per-machine disks go in `disks_dir`; this is the place for images that
+    /// outlive any one definition, and it is what `disk list` defaults to.
+    pub fn images_dir(&self) -> PathBuf {
+        self.root.join("images")
+    }
+
     pub fn create_dirs(&self) -> Result<()> {
-        for dir in [self.root.join("vms"), self.root.join("kernels"), self.run.clone()] {
+        for dir in [
+            self.root.join("vms"),
+            self.root.join("kernels"),
+            self.root.join("images"),
+            self.run.clone(),
+        ] {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating {}", dir.display()))?;
         }

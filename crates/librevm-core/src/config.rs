@@ -153,6 +153,39 @@ impl Default for ConsoleConfig {
     }
 }
 
+/// A disk attached to a machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskConfig {
+    /// The image file.
+    pub path: PathBuf,
+
+    /// Mount it read-only. Also the only safe way to attach an image that is
+    /// shared between machines.
+    #[serde(default)]
+    pub readonly: bool,
+
+    /// Attach it as the root device, so the kernel mounts it as `/` instead of
+    /// needing a `root=` on the command line.
+    #[serde(default)]
+    pub root: bool,
+
+    /// Free-form label, purely for the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A directory shared with the guest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedDirConfig {
+    /// The directory on the host.
+    pub path: PathBuf,
+    /// The tag the guest mounts it by.
+    pub tag: String,
+    /// Read-only?
+    #[serde(default)]
+    pub readonly: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
     pub name: String,
@@ -171,6 +204,18 @@ pub struct VmConfig {
 
     #[serde(default)]
     pub console: ConsoleConfig,
+
+    /// Disk images.
+    ///
+    /// Note that virtio-blk is a virtio device like any other, and on Gunyah those
+    /// are the ones with problems: see the networking notes. An empty list is the
+    /// safe default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<DiskConfig>,
+
+    /// Directories shared with the guest over virtio-9p or virtio-fs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_dirs: Vec<SharedDirConfig>,
 
     /// Free-form description, purely for the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +285,38 @@ impl VmConfig {
         if let Some(initrd) = &self.boot.initramfs {
             if !initrd.exists() {
                 bail!("initramfs {} does not exist", initrd.display());
+            }
+        }
+
+        for disk in &self.disks {
+            if !disk.path.exists() {
+                bail!("disk {} does not exist", disk.path.display());
+            }
+            if !disk.path.is_file() {
+                bail!("disk {} is not a regular file", disk.path.display());
+            }
+        }
+
+        let roots = self.disks.iter().filter(|d| d.root).count();
+        if roots > 1 {
+            bail!("at most one disk can be the root device, and {roots} are marked as such");
+        }
+        if self.disks.iter().any(|d| d.root && d.readonly) {
+            bail!("the root disk cannot be read-only");
+        }
+
+        for dir in &self.shared_dirs {
+            if !dir.path.is_dir() {
+                bail!("shared directory {} does not exist", dir.path.display());
+            }
+            if dir.tag.is_empty() {
+                bail!("shared directory {} needs a tag", dir.path.display());
+            }
+            if dir.tag.contains(':') {
+                bail!(
+                    "the tag {:?} contains a colon, which crosvm uses as its separator",
+                    dir.tag
+                );
             }
         }
 

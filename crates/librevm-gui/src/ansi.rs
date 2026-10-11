@@ -28,7 +28,9 @@ use std::collections::VecDeque;
 const SCROLLBACK: usize = 2000;
 
 /// A colour: either one of the eight ANSI slots, a bright variant, or the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `Hash` is needed because the renderer caches a text tag per distinct colour pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Color {
     #[default]
     Default,
@@ -37,7 +39,7 @@ pub enum Color {
 }
 
 /// The drawing attributes in effect for newly written cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pen {
     pub fg: Color,
     pub bg: Color,

@@ -313,6 +313,38 @@ pub fn build_command(
         args.push(initrd.display().to_string());
     }
 
+    // Disks. crosvm wants a bare path for the root device and a keyed spec for the
+    // rest; read-only is expressed differently in each case.
+    for disk in &vm.disks {
+        if disk.root {
+            args.push("--rwroot".to_string());
+            args.push(format!(
+                "{},ro=false,lock=false",
+                disk.path.display()
+            ));
+            continue;
+        }
+        let mut spec = disk.path.display().to_string();
+        if disk.readonly {
+            spec.push_str(",ro=true");
+        }
+        spec.push_str(",lock=false");
+        args.push("--block".to_string());
+        args.push(spec);
+    }
+
+    // Shared directories, over 9p by default: virtio-fs needs a bigger guest
+    // kernel and a filesystem daemon, and 9p is enough for moving files about.
+    for dir in &vm.shared_dirs {
+        let kind = if dir.readonly { "p9" } else { "p9" };
+        args.push("--shared-dir".to_string());
+        args.push(format!(
+            "{}:{}:type={kind}",
+            dir.path.display(),
+            dir.tag
+        ));
+    }
+
     // crosvm takes the kernel as a positional argument.
     args.push(vm.boot.kernel.display().to_string());
 

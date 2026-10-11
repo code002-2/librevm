@@ -6,11 +6,13 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use librevm_core::config::{
-    BootConfig, ConsoleConfig, Hypervisor, HypervisorConfig, Protection, VmConfig,
+    BootConfig, ConsoleConfig, DiskConfig, Hypervisor, HypervisorConfig, Protection,
+    SharedDirConfig, VmConfig,
 };
+use librevm_core::disk;
+use librevm_core::hub;
 use librevm_core::store::Store;
 use librevm_core::vm::{self, State};
-use librevm_core::hub;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -134,9 +136,145 @@ enum Command {
         force: bool,
     },
 
+    /// Attach or detach a disk.
+    Disk {
+        #[command(subcommand)]
+        action: DiskCommand,
+    },
+
+    /// Share a directory with a VM.
+    Share {
+        #[command(subcommand)]
+        action: ShareCommand,
+    },
+
     /// Internal: the per-VM console hub. Started detached by `start`.
     #[command(hide = true, name = "__hub")]
     Hub { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum DiskCommand {
+    /// Create an image, optionally with a filesystem in it.
+    Create {
+        /// Where to put it.
+        path: PathBuf,
+
+        /// How big, with an optional suffix: 512M, 8G, 1T.
+        #[arg(short, long, default_value = "4G")]
+        size: String,
+
+        /// raw or sparse. Raw images are made sparse on disk anyway, so this only
+        /// matters for tools that expect the Android format.
+        #[arg(short, long, default_value = "raw")]
+        format: String,
+
+        /// Also make a filesystem inside it: ext4, ext2 or vfat. Needs root,
+        /// because it attaches the image to a loop device.
+        #[arg(long)]
+        fs: Option<String>,
+    },
+
+    /// List the images in a directory.
+    List {
+        /// Defaults to the store's images directory.
+        dir: Option<PathBuf>,
+    },
+
+    /// Show what an image is.
+    Info { path: PathBuf },
+
+    /// Grow or shrink an image.
+    Resize {
+        path: PathBuf,
+
+        /// The new size, with an optional suffix.
+        size: String,
+
+        /// Allow shrinking. The filesystem inside must have been shrunk first.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Copy an image. Holes are preserved, so an empty 4 GiB disk does not become
+    /// 4 GiB of host disk.
+    Clone { from: PathBuf, to: PathBuf },
+
+    /// Delete an image.
+    Delete {
+        path: PathBuf,
+
+        /// Do not ask.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Attach an image to a VM.
+    Attach {
+        /// The VM.
+        name: String,
+
+        /// The image.
+        path: PathBuf,
+
+        /// Mount it read-only.
+        #[arg(long)]
+        readonly: bool,
+
+        /// Make it the root device.
+        ///
+        /// The field is not called `root` because the top level CLI already has a
+        /// `root` (the store directory) and clap's derive indexes arguments by field
+        /// name: two fields with the same name collide at runtime with a panic about
+        /// mismatched TypeIds, whatever the long option is called.
+        #[arg(long = "root-disk")]
+        root_disk: bool,
+
+        /// A label for the operator.
+        #[arg(long)]
+        label: Option<String>,
+    },
+
+    /// Detach an image from a VM.
+    Detach {
+        /// The VM.
+        name: String,
+
+        /// The image path, or its index as shown by `librevm show`.
+        path: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ShareCommand {
+    /// Share a directory with a VM.
+    Add {
+        /// The VM.
+        name: String,
+
+        /// The directory on the host.
+        path: PathBuf,
+
+        /// The tag the guest mounts it by. Defaults to the directory's name.
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Share it read-only.
+        #[arg(long)]
+        readonly: bool,
+    },
+
+    /// Stop sharing a directory.
+    Remove {
+        /// The VM.
+        name: String,
+
+        /// The tag, or the host path.
+        tag: String,
+    },
+
+    /// List what a VM has shared.
+    List { name: String },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -244,7 +382,271 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
         Command::Stop { name, grace } => cmd_stop(store, name, *grace),
         Command::Console { name } => cmd_console(store, name),
         Command::Delete { name, force } => cmd_delete(store, name, *force),
+        Command::Disk { action } => cmd_disk(store, action),
+        Command::Share { action } => cmd_share(store, action),
         Command::Hub { name } => hub::run(store, name),
+    }
+}
+
+// -- disks ------------------------------------------------------------------
+
+fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
+    match action {
+        DiskCommand::Create { path, size, format, fs } => {
+            let size = disk::parse_size(size)?;
+            let format = disk::Format::parse(format)?;
+            let made = disk::create(path, size, format)?;
+
+            println!("created {}", made.path.display());
+            println!("  format    : {}", made.format.name());
+            println!("  capacity  : {}", disk::human(made.capacity));
+            println!("  on disk   : {}", disk::human(made.allocated));
+
+            if let Some(kind) = fs {
+                if unsafe { libc::geteuid() } != 0 {
+                    bail!("making a {kind} filesystem needs root (it uses a loop device)");
+                }
+                disk::make_filesystem(path, kind)?;
+                println!("  filesystem: {kind}");
+            }
+            Ok(())
+        }
+
+        DiskCommand::List { dir } => {
+            let dir = dir.clone().unwrap_or_else(|| store.images_dir());
+            let images = disk::list(&dir)?;
+            if images.is_empty() {
+                println!("no images in {}", dir.display());
+                return Ok(());
+            }
+            println!(
+                "{:<34} {:<8} {:>10} {:>10}  {}",
+                "IMAGE", "FORMAT", "CAPACITY", "ON DISK", "SAVED"
+            );
+            for d in &images {
+                println!(
+                    "{:<34} {:<8} {:>10} {:>10}  {:.0}%",
+                    d.path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?"),
+                    d.format.name(),
+                    disk::human(d.capacity),
+                    disk::human(d.allocated),
+                    d.sparse_ratio() * 100.0
+                );
+            }
+            Ok(())
+        }
+
+        DiskCommand::Info { path } => {
+            let d = disk::open(path)?;
+            println!("{}", d.path.display());
+            println!("  format    : {}", d.format.name());
+            println!("  capacity  : {}", disk::human(d.capacity));
+            println!("  on disk   : {}", disk::human(d.allocated));
+            println!("  sparse    : {:.0}% saved", d.sparse_ratio() * 100.0);
+            println!("  read-only : {}", if d.readonly { "yes" } else { "no" });
+            println!(
+                "  writable  : {}",
+                if d.format.writable() {
+                    "yes".to_string()
+                } else {
+                    "no; this format needs qemu, which is not installed".to_string()
+                }
+            );
+            Ok(())
+        }
+
+        DiskCommand::Resize { path, size, force } => {
+            let size = disk::parse_size(size)?;
+            let d = disk::resize(path, size, *force)?;
+            println!(
+                "{} is now {} ({} on disk)",
+                d.path.display(),
+                disk::human(d.capacity),
+                disk::human(d.allocated)
+            );
+            Ok(())
+        }
+
+        DiskCommand::Clone { from, to } => {
+            let d = disk::clone_to(from, to)?;
+            println!(
+                "{} -> {} ({}, {} on disk)",
+                from.display(),
+                d.path.display(),
+                disk::human(d.capacity),
+                disk::human(d.allocated)
+            );
+            Ok(())
+        }
+
+        DiskCommand::Delete { path, force } => {
+            let d = disk::open(path)?;
+            let attached: Vec<String> = store
+                .list()?
+                .into_iter()
+                .filter(|n| {
+                    store
+                        .load(n)
+                        .map(|v| v.disks.iter().any(|x| x.path == d.path))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !attached.is_empty() {
+                bail!(
+                    "{} is attached to {}; detach it first",
+                    d.path.display(),
+                    attached.join(", ")
+                );
+            }
+
+            if !force {
+                eprint!("delete {} ({})? [y/N] ", d.path.display(), disk::human(d.capacity));
+                std::io::stderr().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("left alone");
+                    return Ok(());
+                }
+            }
+            disk::delete(&d.path)?;
+            println!("deleted {}", d.path.display());
+            Ok(())
+        }
+
+        DiskCommand::Attach { name, path, readonly, root_disk, label } => {
+            let mut vm = store.load(name)?;
+            if !path.exists() {
+                bail!("{} does not exist", path.display());
+            }
+            if vm.disks.iter().any(|d| d.path == *path) {
+                bail!("{} is already attached to {name}", path.display());
+            }
+            if *root_disk && vm.disks.iter().any(|d| d.root) {
+                bail!("{name} already has a root disk");
+            }
+            if *root_disk && *readonly {
+                bail!("the root disk cannot be read-only");
+            }
+
+            vm.disks.push(DiskConfig {
+                path: path.clone(),
+                readonly: *readonly,
+                root: *root_disk,
+                label: label.clone(),
+            });
+            vm.validate()?;
+            store.save(&vm)?;
+
+            println!("attached {} to {name}", path.display());
+            println!("  read-only : {}", if *readonly { "yes" } else { "no" });
+            println!("  root      : {}", if *root_disk { "yes" } else { "no" });
+            if vm::state(store, name) != State::Stopped {
+                println!("  note: {name} is running; restart it for this to take effect");
+            }
+            Ok(())
+        }
+
+        DiskCommand::Detach { name, path } => {
+            let mut vm = store.load(name)?;
+
+            // accept either a path or the index `show` prints
+            let index = if let Ok(i) = path.parse::<usize>() {
+                if i < vm.disks.len() {
+                    Some(i)
+                } else {
+                    bail!("{name} has no disk number {i}");
+                }
+            } else {
+                let wanted = PathBuf::from(path);
+                vm.disks.iter().position(|d| d.path == wanted)
+            };
+
+            let Some(index) = index else {
+                bail!("{name} has no disk {path}");
+            };
+            let removed = vm.disks.remove(index);
+            store.save(&vm)?;
+
+            println!("detached {} from {name}", removed.path.display());
+            if vm::state(store, name) != State::Stopped {
+                println!("  note: {name} is running; restart it for this to take effect");
+            }
+            Ok(())
+        }
+    }
+}
+
+// -- shared directories ------------------------------------------------------
+
+fn cmd_share(store: &Store, action: &ShareCommand) -> Result<()> {
+    match action {
+        ShareCommand::Add { name, path, tag, readonly } => {
+            let mut vm = store.load(name)?;
+            if !path.is_dir() {
+                bail!("{} is not a directory", path.display());
+            }
+            let tag = tag.clone().unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("share")
+                    .to_string()
+            });
+            if vm.shared_dirs.iter().any(|d| d.tag == tag) {
+                bail!("{name} already has a share tagged {tag:?}");
+            }
+
+            vm.shared_dirs.push(SharedDirConfig {
+                path: path.clone(),
+                tag: tag.clone(),
+                readonly: *readonly,
+            });
+            vm.validate()?;
+            store.save(&vm)?;
+
+            println!("sharing {} with {name} as {tag:?}", path.display());
+            println!("  in the guest: mount -t 9p -o trans=virtio,version=9p2000.L {tag} /mnt");
+            if vm::state(store, name) != State::Stopped {
+                println!("  note: {name} is running; restart it for this to take effect");
+            }
+            Ok(())
+        }
+
+        ShareCommand::Remove { name, tag } => {
+            let mut vm = store.load(name)?;
+            let index = vm
+                .shared_dirs
+                .iter()
+                .position(|d| &d.tag == tag || d.path.display().to_string() == *tag);
+            let Some(index) = index else {
+                bail!("{name} has no share {tag:?}");
+            };
+            let removed = vm.shared_dirs.remove(index);
+            store.save(&vm)?;
+            println!("stopped sharing {:?}", removed.tag);
+            Ok(())
+        }
+
+        ShareCommand::List { name } => {
+            let vm = store.load(name)?;
+            if vm.shared_dirs.is_empty() {
+                println!("{name} shares nothing");
+                return Ok(());
+            }
+            println!("{:<20} {:<10} {}", "TAG", "MODE", "HOST PATH");
+            for d in &vm.shared_dirs {
+                println!(
+                    "{:<20} {:<10} {}",
+                    d.tag,
+                    if d.readonly { "read-only" } else { "read-write" },
+                    d.path.display()
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -375,6 +777,8 @@ fn cmd_create(
             socket: Some(store.console_socket(name)),
             log: Some(store.console_log(name)),
         },
+        disks: Vec::new(),
+        shared_dirs: Vec::new(),
         description,
     };
 

@@ -656,6 +656,8 @@ pub fn present_create_dialog<F: Fn() + 'static>(
                     cmdline: cmdline_entry.text().to_string(),
                 },
                 console: ConsoleConfig { socket: None, log: None },
+                disks: Vec::new(),
+                shared_dirs: Vec::new(),
                 description: None,
             };
 
