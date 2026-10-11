@@ -40,6 +40,10 @@ pub struct VmView {
     m_console: gtk4::Label,
     start_button: gtk4::Button,
     stop_button: gtk4::Button,
+    /// The disks and shares, which edit the definition in place.
+    disks: Rc<crate::disks::DisksPanel>,
+    /// The group the shares live in, added and removed as the machine changes.
+    shares_holder: gtk4::Box,
     shared: Shared,
 }
 
@@ -163,11 +167,31 @@ impl VmView {
         stack.set_visible_child_name("empty");
 
         let shared = Shared {
-            store,
+            store: store.clone(),
             current: Rc::new(RefCell::new(None)),
             on_changed: Rc::new(RefCell::new(None)),
             on_console: Rc::new(RefCell::new(None)),
         };
+
+        // The disks panel edits the same definition the rest of the pane shows, so
+        // anything it changes has to come back through the same "something changed"
+        // callback the window already listens on.
+        let notify: Rc<dyn Fn()> = {
+            let shared = shared.clone();
+            Rc::new(move || {
+                if let Some(f) = shared.on_changed.borrow().as_ref() {
+                    f();
+                }
+            })
+        };
+        let disks = crate::disks::DisksPanel::new(store, notify);
+
+        // Shares get their own group, because an adw group cannot be nested; this box
+        // holds whichever one is current.
+        let shares_holder = gtk4::Box::new(gtk4::Orientation::Vertical, 18);
+        content.append(&gtk4::Box::new(gtk4::Orientation::Vertical, 0));
+        content.append(disks.widget());
+        content.append(&shares_holder);
 
         let view = Self {
             root: stack,
@@ -182,11 +206,31 @@ impl VmView {
             m_console,
             start_button,
             stop_button,
+            disks,
+            shares_holder,
             shared,
         };
 
         view.wire_actions(plan_button, delete_button, console_button);
         view
+    }
+
+    /// Point the pane at a machine, or clear it.
+    pub fn set_parent(&self, parent: &impl IsA<gtk4::Window>) {
+        self.disks.set_parent(parent);
+    }
+
+    /// Rebuild the disk and share sections for the machine currently shown.
+    fn render_disks(&self) {
+        let name = self.shared.current.borrow().clone();
+        self.disks.render(name.as_deref());
+
+        while let Some(child) = self.shares_holder.first_child() {
+            self.shares_holder.remove(&child);
+        }
+        if let Some(shares) = self.disks.shares() {
+            self.shares_holder.append(&shares);
+        }
     }
 
     pub fn widget(&self) -> gtk4::Widget {
@@ -216,6 +260,7 @@ impl VmView {
 
     pub fn clear(&self) {
         *self.shared.current.borrow_mut() = None;
+        self.render_disks();
         self.root.set_visible_child_name("empty");
     }
 
@@ -235,6 +280,9 @@ impl VmView {
         self.title.set_label(&vm.name);
         self.subtitle
             .set_label(vm.description.as_deref().unwrap_or("no description"));
+
+        // Disks and shares come from the same definition, so they are rebuilt here too.
+        self.render_disks();
 
         self.m_hypervisor.set_label(&vm.hypervisor.backend.to_string());
         self.m_memory.set_label(&format!("{} MiB", vm.memory_mib));

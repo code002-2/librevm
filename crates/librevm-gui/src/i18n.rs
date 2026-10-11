@@ -158,6 +158,24 @@ pub enum Key {
     GunyahStillMissing,
     GunyahNowAvailable,
     ShowDetails,
+
+    // -- disks and shares -------------------------------------------------
+    Disks,
+    NoDisks,
+    AttachDisk,
+    CreateDisk,
+    CreateDiskBody,
+    Detach,
+    RootDisk,
+    ReadOnly,
+    DiskImages,
+    DiskPath,
+    DiskSize,
+    DiskFormat,
+    SharedDirs,
+    AddShare,
+    RestartToApply,
+    VirtioWarning,
 }
 
 impl Key {
@@ -239,6 +257,32 @@ impl Key {
             }
             Key::GunyahNowAvailable => "Gunyah is now available. Machines can be started.",
             Key::ShowDetails => "Details",
+
+            Key::Disks => "Disks",
+            Key::NoDisks => "No disks attached",
+            Key::AttachDisk => "Attach an image",
+            Key::CreateDisk => "New image",
+            Key::CreateDiskBody => {
+                "Make an image and attach it to this machine. A raw image is an \
+                 ordinary file, but the ones made here are sparse, so an empty \
+                 4 GiB disk occupies almost nothing."
+            }
+            Key::Detach => "Detach",
+            Key::RootDisk => "root",
+            Key::ReadOnly => "read-only",
+            Key::DiskImages => "Disk images",
+            Key::DiskPath => "Path",
+            Key::DiskSize => "Size",
+            Key::DiskFormat => "Format",
+            Key::SharedDirs => "Shared directories",
+            Key::AddShare => "Add a share",
+            Key::RestartToApply => "This machine is running; restart it for this to take effect.",
+            Key::VirtioWarning => {
+                "Note: virtio devices do not work under crosvm on Gunyah yet - the \
+                 guest driver kills crosvm with SIGBUS the moment it touches a \
+                 queue. The definition still saves, but the guest cannot use it \
+                 for now."
+            }
         }
     }
 
@@ -314,6 +358,30 @@ impl Key {
             Key::GunyahStillMissing => "Gunyah 仍然不可用。下面是安装脚本的输出。",
             Key::GunyahNowAvailable => "Gunyah 现在可用了，可以启动虚拟机了。",
             Key::ShowDetails => "详情",
+
+            Key::Disks => "磁盘",
+            Key::NoDisks => "还没有挂载磁盘",
+            Key::AttachDisk => "挂载镜像",
+            Key::CreateDisk => "新建镜像",
+            Key::CreateDiskBody => {
+                "新建一个镜像并挂到这台虚拟机上。raw 是普通文件，但本工具建的\
+                 raw 镜像默认是稀疏的，空的 4 GiB 磁盘几乎不占空间。"
+            }
+            Key::Detach => "卸载",
+            Key::RootDisk => "根设备",
+            Key::ReadOnly => "只读",
+            Key::DiskImages => "磁盘镜像",
+            Key::DiskPath => "路径",
+            Key::DiskSize => "容量",
+            Key::DiskFormat => "格式",
+            Key::SharedDirs => "共享目录",
+            Key::AddShare => "添加共享",
+            Key::RestartToApply => "这台虚拟机正在运行，重启后生效。",
+            Key::VirtioWarning => {
+                "注意：Gunyah 上 crosvm 的 virtio 设备目前无法工作——客户机的\
+                 驱动一操作队列，crosvm 就会收到 SIGBUS。定义可以照常保存，\
+                 但客户机暂时用不上它们。"
+            }
         }
     }
 }
