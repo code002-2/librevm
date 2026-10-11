@@ -2,25 +2,42 @@
 # Runs after the package's files are unpacked.
 set -e
 
-# A group for the Gunyah device. The vcpu ioctls still need privilege, so this alone
-# does not let an ordinary user start a guest -- but it does let them read the device
-# for a diagnostic run, and it is where a future daemon would live.
+# A group for the Gunyah device and for talking to the daemon. Membership is what lets
+# a desktop user reach the privileged half over the system bus, so this is now the whole
+# privilege story: no sudoers rule, and the window itself never runs as root.
 if ! getent group librevm >/dev/null 2>&1; then
     addgroup --system librevm >/dev/null 2>&1 || true
 fi
 
 # State that has to exist before the first run.
-install -d -m 755 /var/lib/librevm /var/lib/librevm/kernels /run/librevm
+#
+# The store is group-readable and setgid. The window reads definitions, logs and pid
+# files straight off the disk -- asking the bus for every refresh would be silly -- and
+# group ownership is what makes that possible without running it as root.
+#
+# `install -d` leaves an existing directory's owner and group alone, so an upgrade, or a
+# directory made by an earlier version, needs the group set explicitly.
+install -d -m 2775 /var/lib/librevm /var/lib/librevm/kernels /var/lib/librevm/images
+install -d -m 2775 /run/librevm
+chgrp librevm /var/lib/librevm /var/lib/librevm/kernels /var/lib/librevm/images /run/librevm \
+    2>/dev/null || true
+chmod 2775 /var/lib/librevm /var/lib/librevm/kernels /var/lib/librevm/images /run/librevm \
+    2>/dev/null || true
 
-# The launcher hands over to root through sudo, and both halves append to this log.
-# If it is root-only, the launcher's own write fails and the redirection kills the
-# launch before any window appears.
+# Both halves append to this log. If it is root-only the launcher's own write fails and
+# the redirection kills the launch before any window appears.
 touch /var/log/librevm-gui.log 2>/dev/null || true
 chmod 666 /var/log/librevm-gui.log 2>/dev/null || true
 touch /tmp/librevm-gui.log 2>/dev/null || true
 chmod 666 /tmp/librevm-gui.log 2>/dev/null || true
 
-# The udev rule is new, so make the kernel re-apply the device's permissions.
+# An upgrade keeps the files it finds, so bring an existing store into line.
+if [ -d /var/lib/librevm ]; then
+    chgrp -R librevm /var/lib/librevm 2>/dev/null || true
+    chmod -R g+rX /var/lib/librevm 2>/dev/null || true
+fi
+
+# The udev rule is what gives /dev/gunyah its group, so re-apply it.
 if [ -x /usr/bin/udevadm ] || [ -x /sbin/udevadm ]; then
     udevadm control --reload-rules >/dev/null 2>&1 || true
     udevadm trigger --name-match=gunyah >/dev/null 2>&1 || true
@@ -33,19 +50,30 @@ if [ -x /usr/bin/gtk-update-icon-cache ]; then
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
-# Say something useful rather than leaving the operator to discover it later.
+# Start the daemon now, and at every boot. On an upgrade it is already running, so this
+# is a restart; either way the new binary takes effect without a reboot.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable librevm-daemon.service >/dev/null 2>&1 || true
+    systemctl restart librevm-daemon.service >/dev/null 2>&1 || true
+fi
+
+# An upgrade from a version that used a sudoers rule should not leave it behind: the
+# helper it names no longer exists, and a rule pointing at a missing binary is noise at
+# best.
+rm -f /etc/sudoers.d/librevm-gui 2>/dev/null || true
+
 cat <<'EOF'
 
 librevm is installed.
 
-The window needs to run as root, because Gunyah's vcpu ioctls require privilege.
-To let your desktop user launch it, run:
+The window runs as your own account; the privileged work happens in
+librevm-daemon, which is now running. To let your desktop user reach it, add that
+account to the librevm group:
 
-    sudo librevm-enable-desktop
+    sudo usermod -aG librevm YOUR-NAME
 
-which writes a sudoers rule naming your account. Until then, run the window with:
-
-    sudo librevm-gui-session
+then log out and back in, so the new group membership takes effect.
 
 EOF
 

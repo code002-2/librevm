@@ -16,6 +16,7 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 # The window runs as whoever opened it, so anything privileged goes over the system

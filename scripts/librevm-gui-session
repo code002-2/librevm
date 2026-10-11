@@ -1,13 +1,19 @@
 #!/bin/sh
 # Start librevm-gui inside the running desktop session.
 #
-# Two environments matter here.
+# The window runs as whoever opened it. It reads the store directly -- the directory is
+# group-readable -- and sends everything privileged to librevm-daemon over the system
+# bus. Nothing here needs to become root, which is the point: the alternative was
+# launching the whole GTK program as root so that it could write a TOML file and call
+# kill.
+#
+# Two environments still matter.
 #
 # When the shell starts us we already have the right display and bus, because we
-# inherit them. When a terminal starts us as root we do not, so they are read from
-# the compositor's own environment. Several processes match and they do not all
-# carry the same variables, so candidates are scored -- and a candidate only counts
-# if the display it names actually exists. A root session with
+# inherit them. When a terminal starts us we may not, so they are read from the
+# compositor's own environment. Several processes match and they do not all carry the
+# same variables, so candidates are scored -- and a candidate only counts if the
+# display it names actually exists. A root session with
 # XDG_RUNTIME_DIR=/run/user/0 wins on score and then cannot open a display at all.
 # The bus address copied from another process carries that connection's guid, which
 # cannot be reused, so the guid is stripped.
@@ -30,10 +36,6 @@ fi
 GUI=
 for c in /usr/bin/librevm-gui /usr/local/bin/librevm-gui; do
     [ -x "$c" ] && { GUI=$c; break; }
-done
-ROOT_HELPER=
-for c in /usr/bin/librevm-gui-session-root /usr/local/bin/librevm-gui-session-root; do
-    [ -x "$c" ] && { ROOT_HELPER=$c; break; }
 done
 
 if [ -z "$GUI" ]; then
@@ -115,18 +117,17 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR}/bus" ]; th
     export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 fi
 
-# The GUI needs root to open /dev/gunyah and run a guest; the desktop user cannot.
-# If we are not root, hand over with the display and bus environment intact.
-if [ "$(id -u)" != 0 ]; then
-    if [ -n "$ROOT_HELPER" ] && sudo -n "$ROOT_HELPER" "$@" >/dev/null 2>&1; then
-        exit 0
-    fi
-    log "== not root and sudo was refused; carrying on as $(id -u)"
-fi
-
+# No privilege change. The daemon holds the privileged half, and the window reaches it
+# over the system bus; the group membership that allows that is granted at install time.
 log "== final DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-} uid=$(id -u)"
 
 export GDK_BACKEND=wayland,x11
 export NO_AT_BRIDGE=1
+
+# Say something useful if the daemon is not there, rather than letting the window come
+# up and fail on the first privileged action.
+if ! pgrep -x librevm-daemon >/dev/null 2>&1; then
+    log "== warning: librevm-daemon is not running; privileged actions will fail"
+fi
 
 exec "$GUI" "$@" >> "$LOG" 2>&1

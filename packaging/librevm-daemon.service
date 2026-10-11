@@ -7,7 +7,9 @@ Wants=dbus.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/librevm-daemon
+# /usr/bin is where the package puts it. The hand-install script rewrites this line
+# when it installs into /usr/local instead.
+ExecStart=/usr/bin/librevm-daemon
 Restart=on-failure
 RestartSec=2
 

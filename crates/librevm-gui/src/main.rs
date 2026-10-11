@@ -10,6 +10,7 @@ use libadwaita::prelude::*;
 
 mod ansi;
 mod console;
+mod daemon;
 mod disks;
 mod i18n;
 mod vm_view;

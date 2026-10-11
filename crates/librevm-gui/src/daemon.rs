@@ -15,7 +15,6 @@
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use zbus::blocking::Connection;
-use zbus::zvariant::Value as ZValue;
 
 const BUS_NAME: &str = "org.librevm.Daemon1";
 const OBJECT_PATH: &str = "/org/librevm/Daemon1";
@@ -57,7 +56,10 @@ impl Client {
         Some(Client { conn })
     }
 
-    fn call(&self, method: &str, args: &[ZValue<'_>]) -> Result<Value> {
+    fn call<B>(&self, method: &str, args: &B) -> Result<Value>
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+    {
         let reply = self
             .conn
             .call_method(Some(BUS_NAME), OBJECT_PATH, Some(INTERFACE), method, args)
@@ -80,7 +82,10 @@ impl Client {
     }
 
     /// The `ok`/`message` shape the acting methods return.
-    fn acted(&self, method: &str, args: &[ZValue<'_>]) -> Result<String> {
+    fn acted<B>(&self, method: &str, args: &B) -> Result<String>
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+    {
         let value = self.call(method, args)?;
         Ok(value
             .get("message")
@@ -90,7 +95,7 @@ impl Client {
     }
 
     pub fn list_machines(&self) -> Result<Vec<Value>> {
-        let value = self.call("ListMachines", &[])?;
+        let value = self.call("ListMachines", &())?;
         value
             .as_array()
             .cloned()
@@ -98,34 +103,31 @@ impl Client {
     }
 
     pub fn machine(&self, name: &str) -> Result<Value> {
-        self.call("Machine", &[ZValue::from(name)])
+        self.call("Machine", &(name,))
     }
 
     pub fn host_info(&self) -> Result<Value> {
-        self.call("HostInfo", &[])
+        self.call("HostInfo", &())
     }
 
     pub fn plan(&self, name: &str) -> Result<Value> {
-        self.call("Plan", &[ZValue::from(name)])
+        self.call("Plan", &(name,))
     }
 
     pub fn start_machine(&self, name: &str) -> Result<String> {
-        self.acted("StartMachine", &[ZValue::from(name)])
+        self.acted("StartMachine", &(name,))
     }
 
     pub fn stop_machine(&self, name: &str, grace_secs: u32) -> Result<String> {
-        self.acted(
-            "StopMachine",
-            &[ZValue::from(name), ZValue::from(grace_secs)],
-        )
+        self.acted("StopMachine", &(name, grace_secs))
     }
 
     pub fn create_machine(&self, definition: &str) -> Result<String> {
-        self.acted("CreateMachine", &[ZValue::from(definition)])
+        self.acted("CreateMachine", &(definition,))
     }
 
     pub fn delete_machine(&self, name: &str) -> Result<String> {
-        self.acted("DeleteMachine", &[ZValue::from(name)])
+        self.acted("DeleteMachine", &(name,))
     }
 
     /// The last `max_bytes` of console output.
@@ -156,37 +158,20 @@ impl Client {
     ) -> Result<String> {
         self.acted(
             "AttachDisk",
-            &[
-                ZValue::from(name),
-                ZValue::from(path),
-                ZValue::from(readonly),
-                ZValue::from(root),
-                ZValue::from(label),
-            ],
+            &(name, path, readonly, root, label),
         )
     }
 
     pub fn detach_disk(&self, name: &str, path: &str) -> Result<String> {
-        self.acted(
-            "DetachDisk",
-            &[ZValue::from(name), ZValue::from(path)],
-        )
+        self.acted("DetachDisk", &(name, path))
     }
 
     pub fn add_share(&self, name: &str, path: &str, tag: &str, readonly: bool) -> Result<String> {
-        self.acted(
-            "AddShare",
-            &[
-                ZValue::from(name),
-                ZValue::from(path),
-                ZValue::from(tag),
-                ZValue::from(readonly),
-            ],
-        )
+        self.acted("AddShare", &(name, path, tag, readonly))
     }
 
     pub fn remove_share(&self, name: &str, tag: &str) -> Result<String> {
-        self.acted("RemoveShare", &[ZValue::from(name), ZValue::from(tag)])
+        self.acted("RemoveShare", &(name, tag))
     }
 
     pub fn create_disk(
@@ -196,19 +181,11 @@ impl Client {
         format: &str,
         attach_to: &str,
     ) -> Result<String> {
-        self.acted(
-            "CreateDisk",
-            &[
-                ZValue::from(path),
-                ZValue::from(size),
-                ZValue::from(format),
-                ZValue::from(attach_to),
-            ],
-        )
+        self.acted("CreateDisk", &(path, size, format, attach_to))
     }
 
     pub fn list_disks(&self) -> Result<Vec<Value>> {
-        let value = self.call("ListDisks", &[])?;
+        let value = self.call("ListDisks", &())?;
         value
             .as_array()
             .cloned()

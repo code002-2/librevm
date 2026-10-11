@@ -3,9 +3,15 @@
 set -e
 
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-    # The sudoers rule names a user; remove it so a stale account name does not block
-    # a future reinstall or a different user.
-    rm -f /etc/sudoers.d/librevm-gui
+    # Stop the daemon before its binary goes away, so systemd is not left trying to
+    # restart something that no longer exists.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop librevm-daemon.service >/dev/null 2>&1 || true
+        systemctl disable librevm-daemon.service >/dev/null 2>&1 || true
+    fi
+
+    # A rule from an older version would name a helper this package no longer ships.
+    rm -f /etc/sudoers.d/librevm-gui 2>/dev/null || true
 
     if [ -x /usr/bin/update-desktop-database ]; then
         update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true

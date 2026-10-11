@@ -54,14 +54,21 @@ do_uninstall() {
         "$SBINDIR/install-gunyah" \
         "$BINDIR/librevm" \
         "$BINDIR/librevm-gui" \
+        "$BINDIR/librevm-daemon" \
         "$BINDIR/librevm-gui-session" \
-        "$BINDIR/librevm-gui-session-root" \
         "$LIBEXECDIR/librevm-get-gunyah"
     do
         if [ -e "$(p "$f")" ]; then
             rm -f "$(p "$f")" && say "  removed $f"
         fi
     done
+
+    step "stopping the daemon"
+    systemctl stop librevm-daemon 2>/dev/null || true
+    systemctl disable librevm-daemon 2>/dev/null || true
+    rm -f "$(p /etc/systemd/system/librevm-daemon.service)" && say "  removed the unit"
+    rm -f "$(p /usr/share/dbus-1/system.d/org.librevm.Daemon1.conf)" && say "  removed the bus policy"
+    systemctl daemon-reload 2>/dev/null || true
 
     step "removing integration"
     for f in \
@@ -80,6 +87,7 @@ do_uninstall() {
     say ""
     say "Note: the Gunyah modules and /etc/modules-load.d/gunyah.conf are left alone."
     say "      Remove them with: install-gunyah --uninstall"
+    say "      The store in /var/lib/librevm is left alone too."
 }
 
 # ---------------------------------------------------------------------------
@@ -88,35 +96,63 @@ do_install() {
     step "binaries"
     local core=$root/target/release/librevm
     local gui=$root/target/release/librevm-gui
+    local daemon=$root/target/release/librevm-daemon
 
-    if [ "$BUILD" = yes ] && { [ ! -x "$core" ] || [ ! -x "$gui" ]; }; then
+    if [ "$BUILD" = yes ] && { [ ! -x "$core" ] || [ ! -x "$gui" ] || [ ! -x "$daemon" ]; }; then
         say "  building (this takes a few minutes the first time)"
         command -v cargo >/dev/null 2>&1 || die "cargo is not installed"
-        ( cd "$root" && cargo build --release ) || die "the build failed"
+        # Limited on purpose. An unqualified `cargo build` on this class of device takes
+        # every core and leaves the desktop unable to answer, which is a poor trade for
+        # finishing a few minutes sooner.
+        ( cd "$root" && nice -n 10 cargo build --release -j2 ) || die "the build failed"
     fi
 
-    [ -x "$core" ] || die "$core is missing; run without --no-build"
-    [ -x "$gui" ]  || die "$gui is missing; run without --no-build"
+    [ -x "$core" ]   || die "$core is missing; run without --no-build"
+    [ -x "$gui" ]    || die "$gui is missing; run without --no-build"
+    [ -x "$daemon" ] || die "$daemon is missing; run without --no-build"
 
     install -d "$(p "$BINDIR")" "$(p "$SBINDIR")" "$(p "$LIBEXECDIR")"
-    install -m 755 "$core" "$(p "$BINDIR/librevm")"
-    install -m 755 "$gui"  "$(p "$BINDIR/librevm-gui")"
+    install -m 755 "$core"   "$(p "$BINDIR/librevm")"
+    install -m 755 "$gui"    "$(p "$BINDIR/librevm-gui")"
+    install -m 755 "$daemon" "$(p "$BINDIR/librevm-daemon")"
     say "  $BINDIR/librevm"
     say "  $BINDIR/librevm-gui"
+    say "  $BINDIR/librevm-daemon"
 
     step "scripts"
-    install -m 755 "$here/librevm-gui-session"      "$(p "$BINDIR/librevm-gui-session")"
-    install -m 755 "$here/librevm-gui-session-root" "$(p "$BINDIR/librevm-gui-session-root")"
-    install -m 755 "$here/install-gunyah.sh"        "$(p "$SBINDIR/install-gunyah")"
-    install -m 755 "$here/librevm-get-gunyah.sh"    "$(p "$LIBEXECDIR/librevm-get-gunyah")"
+    install -m 755 "$here/librevm-gui-session"   "$(p "$BINDIR/librevm-gui-session")"
+    install -m 755 "$here/install-gunyah.sh"     "$(p "$SBINDIR/install-gunyah")"
+    install -m 755 "$here/librevm-get-gunyah.sh" "$(p "$LIBEXECDIR/librevm-get-gunyah")"
     say "  $BINDIR/librevm-gui-session"
-    say "  $BINDIR/librevm-gui-session-root"
     say "  $SBINDIR/install-gunyah"
     say "  $LIBEXECDIR/librevm-get-gunyah"
 
+    step "daemon integration"
+    install -d "$(p /usr/lib/systemd/system)" "$(p /usr/share/dbus-1/system.d)"
+    # The unit names /usr/bin, which is where a package puts it; re-point it at wherever
+    # this script is installing.
+    sed "s|^ExecStart=/usr/bin/|ExecStart=$BINDIR/|" \
+        "$root/packaging/librevm-daemon.service" \
+        > "$(p /usr/lib/systemd/system/librevm-daemon.service)"
+    install -m 644 "$root/packaging/org.librevm.Daemon1.conf" \
+        "$(p /usr/share/dbus-1/system.d/org.librevm.Daemon1.conf)"
+    say "  /usr/lib/systemd/system/librevm-daemon.service"
+    say "  /usr/share/dbus-1/system.d/org.librevm.Daemon1.conf"
+
+    # A unit left in /etc by an older install would shadow this one and name a path
+    # that may no longer exist.
+    if [ -z "$DESTDIR" ] && [ -e /etc/systemd/system/librevm-daemon.service ]; then
+        rm -f /etc/systemd/system/librevm-daemon.service
+        say "  removed a stale /etc/systemd/system/librevm-daemon.service"
+    fi
+
     step "state directory"
-    install -d -m 755 "$(p /var/lib/librevm)" "$(p /var/lib/librevm/kernels)" "$(p /run/librevm)"
-    say "  /var/lib/librevm and /run/librevm"
+    install -d -m 2775 "$(p /var/lib/librevm)" "$(p /var/lib/librevm/kernels)" \
+        "$(p /var/lib/librevm/images)" "$(p /run/librevm)"
+    # The window reads the store directly, so the group has to be able to.
+    chgrp -R librevm "$(p /var/lib/librevm)" "$(p /run/librevm)" 2>/dev/null || true
+    chmod -R g+rX "$(p /var/lib/librevm)" 2>/dev/null || true
+    say "  /var/lib/librevm and /run/librevm (group librevm)"
 
     step "gunyah access group"
     if getent group librevm >/dev/null 2>&1; then
@@ -154,27 +190,38 @@ do_install() {
         "$(p /etc/udev/rules.d/60-gunyah.rules)"
     say "  /etc/udev/rules.d/60-gunyah.rules"
 
-    step "sudoers rule"
-    if [ -z "$DESTDIR" ]; then
-        if [ -n "$DESKTOP_USER" ]; then
-            sed "s/^piano /$DESKTOP_USER /" "$root/packaging/sudoers-librevm-gui" \
-                > /etc/sudoers.d/librevm-gui
-            chmod 440 /etc/sudoers.d/librevm-gui
-            if visudo -c >/dev/null 2>&1; then
-                say "  /etc/sudoers.d/librevm-gui (for $DESKTOP_USER)"
+    step "group membership"
+    if [ -z "$DESTDIR" ] && [ -n "$DESKTOP_USER" ]; then
+        # Being in the group is the whole privilege story now: it lets the account reach
+        # the daemon on the system bus. There is no sudoers rule to write.
+        if id "$DESKTOP_USER" >/dev/null 2>&1; then
+            if id -nG "$DESKTOP_USER" 2>/dev/null | tr ' ' '\n' | grep -qx librevm; then
+                say "  $DESKTOP_USER is already in librevm"
             else
-                rm -f /etc/sudoers.d/librevm-gui
-                die "the sudoers rule did not validate and was removed"
+                usermod -aG librevm "$DESKTOP_USER" 2>/dev/null \
+                    && say "  added $DESKTOP_USER to librevm (log out and back in)" \
+                    || warn "could not add $DESKTOP_USER to librevm"
             fi
         else
-            warn "no desktop user, so no sudoers rule was written"
-            warn "the GUI will not be launchable from the desktop without it"
+            warn "no such user: $DESKTOP_USER"
         fi
     fi
 
-    # The GUI hands over to root, and both halves log to the same place. If the file
-    # is root-only, the launcher's own log write fails and the redirection kills the
-    # launch before the window ever appears.
+    step "starting the daemon"
+    if [ -z "$DESTDIR" ]; then
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl enable --now librevm-daemon 2>/dev/null; then
+            say "  librevm-daemon is running"
+        else
+            warn "could not start librevm-daemon; the window will manage the store directly"
+            warn "which needs it to be run as root"
+        fi
+        # A rule from an older install names a helper this version does not ship.
+        rm -f /etc/sudoers.d/librevm-gui 2>/dev/null || true
+    fi
+
+    # Both halves log to the same place. If the file is root-only, the launcher's own
+    # write fails and the redirection kills the launch before the window appears.
     for f in /var/log/librevm-gui.log /tmp/librevm-gui.log; do
         [ -n "$DESTDIR" ] && continue
         touch "$f" 2>/dev/null && chmod 666 "$f" 2>/dev/null

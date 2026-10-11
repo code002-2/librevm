@@ -100,30 +100,73 @@ cargo build --release
 
 ```
 target/release/librevm        命令行
-target/release/librevm-gui    图形界面
+target/release/librevm-gui    图形界面（以你自己的账号运行）
+target/release/librevm-daemon 特权部分，跑在系统总线上
 ```
 
 ## 安装
 
+最简单的是装 deb：
+
 ```sh
-sudo install -m755 target/release/librevm     /usr/local/bin/librevm
-sudo install -m755 target/release/librevm-gui /usr/local/bin/librevm-gui
-
-sudo install -m755 scripts/install-gunyah.sh        /usr/local/sbin/install-gunyah
-sudo install -m755 scripts/librevm-gui-session      /usr/local/bin/librevm-gui-session
-sudo install -m755 scripts/librevm-gui-session-root /usr/local/bin/librevm-gui-session-root
-sudo install -m755 scripts/librevm-get-gunyah.sh    /usr/local/libexec/librevm-get-gunyah
-
-sudo install -m644 packaging/librevm.desktop /usr/share/applications/librevm.desktop
-sudo install -m644 packaging/60-gunyah.rules /etc/udev/rules.d/60-gunyah.rules
-sudo install -m440 packaging/sudoers-librevm-gui /etc/sudoers.d/librevm-gui
+sudo dpkg -i librevm_0.1.0_arm64.deb
+sudo usermod -aG librevm $USER      # 然后注销重新登录
 ```
 
-或者直接：
+或者从源码树装到 `/usr/local`：
 
 ```sh
 sudo ./scripts/install.sh
 ```
+
+它会把三个程序、Gunyah 安装脚本、桌面项、udev 规则、D-Bus 策略和
+systemd 单元都放好，并把你的账号加进 `librevm` 组。
+
+自己一步步装也行：
+
+```sh
+sudo install -m755 target/release/librevm        /usr/local/bin/librevm
+sudo install -m755 target/release/librevm-gui    /usr/local/bin/librevm-gui
+sudo install -m755 target/release/librevm-daemon /usr/local/bin/librevm-daemon
+
+sudo install -m755 scripts/install-gunyah.sh     /usr/local/sbin/install-gunyah
+sudo install -m755 scripts/librevm-gui-session   /usr/local/bin/librevm-gui-session
+sudo install -m755 scripts/librevm-get-gunyah.sh /usr/local/libexec/librevm-get-gunyah
+
+sudo install -m644 packaging/librevm.desktop /usr/share/applications/librevm.desktop
+sudo install -m644 packaging/60-gunyah.rules /etc/udev/rules.d/60-gunyah.rules
+sudo install -m644 packaging/org.librevm.Daemon1.conf \
+    /usr/share/dbus-1/system.d/org.librevm.Daemon1.conf
+sudo install -m644 packaging/librevm-daemon.service \
+    /usr/lib/systemd/system/librevm-daemon.service
+sudo systemctl enable --now librevm-daemon
+```
+
+### 为什么有 daemon
+
+窗口**以你自己的账号运行**，从不提权。
+
+它需要读写三样属于 root 的东西：`/var/lib/librevm` 里的虚拟机定义、
+`/dev/gunyah`，以及启动一个客户机。以前的做法是用 sudo 把**整个 GTK 程序**
+提权——那意味着 GTK、它的渲染器、图片解码器，全都在 root 下解析你选的文件。
+为了写一个 TOML 和调一次 `kill`，这个代价太大。
+
+现在特权部分在 `librevm-daemon` 里，接口很小，摆在系统总线上，由 D-Bus 策略
+限定只有 `librevm` 组够得着。窗口自己：
+
+* **读** store 是直接读的（目录是组可读的，刷新时不必来回问总线）；
+* **写和启动**走 daemon。
+
+如果 daemon 不在（没装，或者你就想用 root 跑），窗口会回落到直接调用，
+功能一样。日志里会写明它选了哪条路。
+
+把账号加进组：
+
+```sh
+sudo usermod -aG librevm $USER
+```
+
+然后注销重新登录——组关系是登录时确定的。
 
 ## 用法
 

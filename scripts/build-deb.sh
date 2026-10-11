@@ -47,8 +47,10 @@ if [ "$BUILD" = yes ]; then
 fi
 CORE=$root/target/release/librevm
 GUI=$root/target/release/librevm-gui
-[ -x "$CORE" ] || die "$CORE is missing; run with --build, or build first"
-[ -x "$GUI" ]  || die "$GUI is missing; run with --build, or build first"
+DAEMON=$root/target/release/librevm-daemon
+[ -x "$CORE" ]   || die "$CORE is missing; run with --build, or build first"
+[ -x "$GUI" ]    || die "$GUI is missing; run with --build, or build first"
+[ -x "$DAEMON" ] || die "$DAEMON is missing; run with --build, or build first"
 
 pkgroot=$(mktemp -d)
 trap 'rm -rf "$pkgroot"' EXIT
@@ -62,23 +64,29 @@ install -d "$pkgroot/usr/bin"
 install -d "$pkgroot/usr/sbin"
 install -d "$pkgroot/usr/libexec"
 install -d "$pkgroot/usr/lib/udev/rules.d"
+install -d "$pkgroot/usr/lib/systemd/system"
 install -d "$pkgroot/usr/share/applications"
 install -d "$pkgroot/usr/share/icons/hicolor/scalable/apps"
+install -d "$pkgroot/usr/share/dbus-1/system.d"
 install -d "$pkgroot/usr/share/doc/librevm"
 install -d "$pkgroot/usr/share/librevm"
 
-install -m 755 "$CORE" "$pkgroot/usr/bin/librevm"
-install -m 755 "$GUI"  "$pkgroot/usr/bin/librevm-gui"
+install -m 755 "$CORE"   "$pkgroot/usr/bin/librevm"
+install -m 755 "$GUI"    "$pkgroot/usr/bin/librevm-gui"
+# The privileged half. The window talks to it over the system bus instead of running
+# as root itself.
+install -m 755 "$DAEMON" "$pkgroot/usr/bin/librevm-daemon"
 install -m 755 "$root/scripts/librevm-gui-session"      "$pkgroot/usr/bin/librevm-gui-session"
-install -m 755 "$root/scripts/librevm-gui-session-root" "$pkgroot/usr/bin/librevm-gui-session-root"
 install -m 755 "$root/scripts/install-gunyah.sh"        "$pkgroot/usr/sbin/install-gunyah"
 install -m 755 "$root/scripts/librevm-get-gunyah.sh"    "$pkgroot/usr/libexec/librevm-get-gunyah"
-install -m 755 "$root/scripts/librevm-enable-desktop"   "$pkgroot/usr/bin/librevm-enable-desktop" 2>/dev/null || true
 
 install -m 644 "$root/packaging/librevm.desktop" "$pkgroot/usr/share/applications/librevm.desktop"
 install -m 644 "$root/packaging/librevm.svg"     "$pkgroot/usr/share/icons/hicolor/scalable/apps/librevm.svg"
 install -m 644 "$root/packaging/60-gunyah.rules" "$pkgroot/usr/lib/udev/rules.d/60-gunyah.rules"
-install -m 644 "$root/packaging/sudoers-librevm-gui" "$pkgroot/usr/share/librevm/sudoers-librevm-gui"
+# The bus policy is what lets the librevm group reach the daemon, and the unit is what
+# starts it at boot.
+install -m 644 "$root/packaging/org.librevm.Daemon1.conf"  "$pkgroot/usr/share/dbus-1/system.d/org.librevm.Daemon1.conf"
+install -m 644 "$root/packaging/librevm-daemon.service"    "$pkgroot/usr/lib/systemd/system/librevm-daemon.service"
 
 install -m 644 "$root/README.md"  "$pkgroot/usr/share/doc/librevm/README.md"
 install -m 644 "$root/LICENSE"    "$pkgroot/usr/share/doc/librevm/copyright"
@@ -110,7 +118,9 @@ fi
 # ${shlibs:Depends} for dpkg-deb to choke on.
 deps=
 if command -v dpkg-shlibdeps >/dev/null 2>&1; then
-    deps=$(cd "$pkgroot" && dpkg-shlibdeps -O usr/bin/librevm-gui usr/bin/librevm 2>/dev/null \
+    # The daemon is included too: it links its own libc and whatever zbus pulls in, and
+    # leaving it out would produce a package that installs a binary it cannot run.
+    deps=$(cd "$pkgroot" && dpkg-shlibdeps -O usr/bin/librevm-gui usr/bin/librevm usr/bin/librevm-daemon 2>/dev/null \
         | sed -n 's/^shlibs:Depends=//p')
 fi
 if [ -n "$deps" ]; then
