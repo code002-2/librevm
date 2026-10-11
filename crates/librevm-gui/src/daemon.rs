@@ -126,6 +126,25 @@ impl Client {
         self.acted("CreateMachine", &(definition,))
     }
 
+    /// Replace an existing definition. The store belongs to root, so the settings editor
+    /// goes through here rather than writing it as the desktop user.
+    pub fn save_machine(&self, definition: &str) -> Result<String> {
+        self.acted("SaveMachine", &(definition,))
+    }
+
+    /// Bring the host side of a guest network up, and get what the guest should use.
+    pub fn net_setup(&self, index: u8) -> Result<Value> {
+        self.call("NetSetup", &(index,))
+    }
+
+    pub fn net_teardown(&self) -> Result<String> {
+        self.acted("NetTeardown", &())
+    }
+
+    pub fn net_status(&self) -> Result<Value> {
+        self.call("NetStatus", &())
+    }
+
     pub fn delete_machine(&self, name: &str) -> Result<String> {
         self.acted("DeleteMachine", &(name,))
     }
@@ -206,6 +225,16 @@ impl Client {
 #[derive(Default)]
 pub struct Bridge {
     client: Option<Client>,
+}
+
+impl Clone for Bridge {
+    fn clone(&self) -> Self {
+        // A `zbus` blocking connection is a handle to a socket shared behind an `Arc`, so
+        // cloning the client is cheap and both halves see the same bus.
+        Bridge {
+            client: self.client.as_ref().and_then(|_| Client::connect()),
+        }
+    }
 }
 
 impl Bridge {

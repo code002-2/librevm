@@ -12,6 +12,7 @@ mod ansi;
 mod console;
 mod daemon;
 mod disks;
+mod editor;
 mod i18n;
 mod vm_view;
 mod window;

@@ -270,6 +270,85 @@ impl Daemon {
         }
     }
 
+    /// Replace an existing machine's definition.
+    ///
+    /// The window edits definitions as the desktop user, and the store belongs to root, so
+    /// this is the path the settings editor uses. It also puts the host side of the guest
+    /// network up or down to match, which needs root for the same reason.
+    async fn save_machine(&self, definition: String) -> String {
+        let result = (|| -> Result<String> {
+            let mut vm = VmConfig::from_toml(&definition)?;
+            Self::check_name(&vm.name)?;
+            if !self.store.exists(&vm.name) {
+                bail!("{} does not exist", vm.name);
+            }
+
+            // The console paths belong to the store, not to whatever the caller sent.
+            let existing = self.store.load(&vm.name)?;
+            vm.console = existing.console.clone();
+            vm.validate()?;
+
+            let was_enabled = existing.network.enabled;
+            let now_enabled = vm.network.enabled;
+
+            // A machine reads its definition once, at start, so nothing here has to stop
+            // it; the caller is told to restart instead.
+            if now_enabled {
+                librevm_core::net::setup(vm.network.index)?;
+            } else if was_enabled {
+                librevm_core::net::teardown().ok();
+            }
+
+            self.store.save(&vm)?;
+            Ok(format!("saved {}", vm.name))
+        })();
+        match result {
+            Ok(m) => to_json(&serde_json::json!({ "ok": true, "message": m })),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Bring the host side of the guest network up, and say what the guest should use.
+    async fn net_setup(&self, index: u8) -> String {
+        match librevm_core::net::setup(index) {
+            Ok(guest) => to_json(&serde_json::json!({
+                "ok": true,
+                "interface": guest.interface,
+                "address": guest.address.to_string(),
+                "prefix": guest.prefix,
+                "gateway": guest.gateway.to_string(),
+                "dns": guest.dns.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                "script": guest.script(),
+            })),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Take the host side down.
+    async fn net_teardown(&self) -> String {
+        match librevm_core::net::teardown() {
+            Ok(()) => to_json(&serde_json::json!({ "ok": true, "message": "the tap is gone" })),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Whether the tap is there, and what it is addressed.
+    async fn net_status(&self) -> String {
+        let up = librevm_core::net::is_up();
+        let read = |name: &str| {
+            std::fs::read_to_string(format!("/sys/class/net/{}/{name}", librevm_core::net::TAP_NAME))
+                .map(|s| s.trim().to_string())
+                .ok()
+        };
+        to_json(&serde_json::json!({
+            "ok": true,
+            "tap": librevm_core::net::TAP_NAME,
+            "present": up,
+            "mac": read("address"),
+            "mtu": read("mtu"),
+        }))
+    }
+
     /// Remove a machine and everything it owns.
     async fn delete_machine(&self, name: String) -> String {
         let result = (|| -> Result<String> {

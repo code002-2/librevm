@@ -140,11 +140,21 @@ impl VmView {
             .css_classes(["destructive-action", "pill"])
             .build();
 
+        // The editor is a separate dialog rather than a tab here, because it writes the
+        // whole definition at once and the pane only shows it.
+        let settings_button = gtk4::Button::builder()
+            .label(i18n::tr(i18n::Key::Settings))
+            .icon_name("emblem-system-symbolic")
+            .tooltip_text(i18n::tr(i18n::Key::EditMachine))
+            .css_classes(["pill"])
+            .build();
+
         let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         actions.set_margin_top(26);
         actions.append(&start_button);
         actions.append(&stop_button);
         actions.append(&console_button);
+        actions.append(&settings_button);
         actions.append(&plan_button);
         let actions_spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         actions_spacer.set_hexpand(true);
@@ -216,7 +226,7 @@ impl VmView {
             shared,
         };
 
-        view.wire_actions(plan_button, delete_button, console_button);
+        view.wire_actions(plan_button, delete_button, console_button, settings_button);
         view
     }
 
@@ -320,6 +330,7 @@ impl VmView {
         plan_button: gtk4::Button,
         delete_button: gtk4::Button,
         console_button: gtk4::Button,
+        settings_button: gtk4::Button,
     ) {
         let window_of = {
             let root = self.root.clone();
@@ -437,9 +448,30 @@ impl VmView {
             });
         }
 
-        // Show the crosvm command line
+        // Machine settings: one dialog that writes the whole definition.
         {
             let shared = self.shared.clone();
+            let notify = {
+                let view_state = self.shared.clone();
+                move || {
+                    if let Some(f) = view_state.on_changed.borrow().as_ref() {
+                        f();
+                    }
+                }
+            };
+            let window_of = window_of.clone();
+            settings_button.connect_clicked(move |_| {
+                let Some(name) = shared.current.borrow().clone() else { return };
+                let store = shared.store.clone();
+                let notify = notify.clone();
+                crate::editor::present_editor(store, &name, window_of().as_ref(), move || {
+                    notify();
+                });
+            });
+        }
+
+        // Show the crosvm command line
+        {            let shared = self.shared.clone();
             let window_of = window_of.clone();
             plan_button.connect_clicked(move |_| {
                 let Some(name) = shared.current.borrow().clone() else { return };

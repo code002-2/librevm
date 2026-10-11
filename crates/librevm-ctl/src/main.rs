@@ -439,11 +439,8 @@ fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
                 Ok(guest) => {
                     println!("networking enabled for {name}");
                     println!();
-                    println!("The host is ready. In the guest:");
+                    println!("guest:");
                     print!("{}", indent(&guest.script()));
-                    println!();
-                    println!("The guest needs a DHCP client or that script at boot; the");
-                    println!("address is a static one on this network, not a lease.");
                     Ok(())
                 }
                 Err(e) => {
@@ -465,9 +462,7 @@ fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
 
         NetCommand::Setup { index } => {
             let guest = librevm_core::net::setup(*index)?;
-            println!("the tap is up");
-            println!();
-            println!("In the guest:");
+            println!("tap up");
             print!("{}", indent(&guest.script()));
             Ok(())
         }
@@ -479,12 +474,12 @@ fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
         }
 
         NetCommand::Status => {
-            println!("tap      : {}", librevm_core::net::TAP_NAME);
+            let name = librevm_core::net::TAP_NAME;
+            println!("tap      : {name}");
             println!(
                 "present  : {}",
                 if librevm_core::net::is_up() { "yes" } else { "no" }
             );
-            let name = librevm_core::net::TAP_NAME;
             for (label, path) in [
                 ("address", format!("/sys/class/net/{name}/address")),
                 ("mtu", format!("/sys/class/net/{name}/mtu")),
@@ -493,10 +488,6 @@ fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
                     println!("{label:<9}: {}", v.trim());
                 }
             }
-            println!();
-            println!("Note: this is forwarding, not NAT. The guest takes an address on the");
-            println!("host's own subnet, which is what removes the need for translation --");
-            println!("and this kernel has no nf_nat to translate with in any case.");
             Ok(())
         }
     }

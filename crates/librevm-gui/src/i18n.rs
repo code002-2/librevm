@@ -176,6 +176,22 @@ pub enum Key {
     AddShare,
     RestartToApply,
     VirtioWarning,
+
+    // -- the editor -------------------------------------------------------
+    EditMachine,
+    Save,
+    Description,
+    Initramfs,
+    GroupBoot,
+    GroupNetwork,
+    GuestNetwork,
+    GuestNetworkHint,
+    NetworkIndex,
+    NetworkIndexHint,
+    SwiotlbTooBig,
+    SwiotlbTooBigBody,
+    CouldNotSave,
+    Settings,
 }
 
 impl Key {
@@ -259,30 +275,42 @@ impl Key {
             Key::ShowDetails => "Details",
 
             Key::Disks => "Disks",
-            Key::NoDisks => "No disks attached",
-            Key::AttachDisk => "Attach an image",
-            Key::CreateDisk => "New image",
+            Key::NoDisks => "No disks",
+            Key::AttachDisk => "Attach",
+            Key::CreateDisk => "New",
             Key::CreateDiskBody => {
-                "Make an image and attach it to this machine. A raw image is an \
-                 ordinary file, but the ones made here are sparse, so an empty \
-                 4 GiB disk occupies almost nothing."
+                "Created sparse: an empty 4 GiB image occupies almost nothing."
             }
             Key::Detach => "Detach",
             Key::RootDisk => "root",
-            Key::ReadOnly => "read-only",
-            Key::DiskImages => "Disk images",
+            Key::ReadOnly => "ro",
+            Key::DiskImages => "Images",
             Key::DiskPath => "Path",
             Key::DiskSize => "Size",
             Key::DiskFormat => "Format",
-            Key::SharedDirs => "Shared directories",
-            Key::AddShare => "Add a share",
-            Key::RestartToApply => "This machine is running; restart it for this to take effect.",
+            Key::SharedDirs => "Shares",
+            Key::AddShare => "Add",
+            Key::RestartToApply => "Restart to apply.",
             Key::VirtioWarning => {
-                "Note: virtio devices do not work under crosvm on Gunyah yet - the \
-                 guest driver kills crosvm with SIGBUS the moment it touches a \
-                 queue. The definition still saves, but the guest cannot use it \
-                 for now."
+                "virtio needs --no-balloon, which librevm passes by default."
             }
+
+            Key::EditMachine => "Settings",
+            Key::Save => "Save",
+            Key::Description => "Description",
+            Key::Initramfs => "Initramfs",
+            Key::GroupBoot => "Boot",
+            Key::GroupNetwork => "Network",
+            Key::GuestNetwork => "Network",
+            Key::GuestNetworkHint => {
+                "Address on the host's subnet, forwarded by the host. Not NAT."
+            }
+            Key::NetworkIndex => "Index",
+            Key::NetworkIndexHint => "Added to .201. Must differ per machine.",
+            Key::SwiotlbTooBig => "swiotlb >= memory",
+            Key::SwiotlbTooBigBody => "crosvm computes memory - swiotlb and panics.",
+            Key::CouldNotSave => "Could not save",
+            Key::Settings => "Settings",
         }
     }
 
@@ -360,28 +388,38 @@ impl Key {
             Key::ShowDetails => "详情",
 
             Key::Disks => "磁盘",
-            Key::NoDisks => "还没有挂载磁盘",
-            Key::AttachDisk => "挂载镜像",
-            Key::CreateDisk => "新建镜像",
-            Key::CreateDiskBody => {
-                "新建一个镜像并挂到这台虚拟机上。raw 是普通文件，但本工具建的\
-                 raw 镜像默认是稀疏的，空的 4 GiB 磁盘几乎不占空间。"
-            }
+            Key::NoDisks => "无磁盘",
+            Key::AttachDisk => "挂载",
+            Key::CreateDisk => "新建",
+            Key::CreateDiskBody => "稀疏创建：空的 4 GiB 镜像几乎不占空间。",
             Key::Detach => "卸载",
-            Key::RootDisk => "根设备",
+            Key::RootDisk => "根",
             Key::ReadOnly => "只读",
-            Key::DiskImages => "磁盘镜像",
+            Key::DiskImages => "镜像",
             Key::DiskPath => "路径",
             Key::DiskSize => "容量",
             Key::DiskFormat => "格式",
-            Key::SharedDirs => "共享目录",
-            Key::AddShare => "添加共享",
-            Key::RestartToApply => "这台虚拟机正在运行，重启后生效。",
+            Key::SharedDirs => "共享",
+            Key::AddShare => "添加",
+            Key::RestartToApply => "重启后生效。",
             Key::VirtioWarning => {
-                "注意：Gunyah 上 crosvm 的 virtio 设备目前无法工作——客户机的\
-                 驱动一操作队列，crosvm 就会收到 SIGBUS。定义可以照常保存，\
-                 但客户机暂时用不上它们。"
+                "virtio 需要 --no-balloon，librevm 已默认开启。"
             }
+
+            Key::EditMachine => "虚拟机设置",
+            Key::Save => "保存",
+            Key::Description => "描述",
+            Key::Initramfs => "initramfs",
+            Key::GroupBoot => "启动",
+            Key::GroupNetwork => "网络",
+            Key::GuestNetwork => "网络",
+            Key::GuestNetworkHint => "用宿主网段的地址，由宿主转发。非 NAT。",
+            Key::NetworkIndex => "序号",
+            Key::NetworkIndexHint => "加在 .201 上，各虚拟机不能相同。",
+            Key::SwiotlbTooBig => "swiotlb >= 内存",
+            Key::SwiotlbTooBigBody => "crosvm 用「内存 − swiotlb」算，减出负数会崩。",
+            Key::CouldNotSave => "保存失败",
+            Key::Settings => "设置",
         }
     }
 }
