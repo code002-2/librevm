@@ -18,12 +18,19 @@ User=root
 Group=root
 
 # It opens sockets for console hubs and writes under /var/lib and /run.
+#
+# StateDirectory gives the directory mode 2775, but the group comes from Group= above, so
+# systemd creates it as root:root and the setgid bit then makes every new file root:root
+# too. The desktop user is in `librevm` and has to be able to write definitions, so the
+# group is fixed after the directory exists. The daemon itself does not depend on this --
+# it runs as root -- so a failure here is not worth stopping for.
 RuntimeDirectory=librevm
-RuntimeDirectoryMode=0775
+RuntimeDirectoryMode=2775
 StateDirectory=librevm
 StateDirectoryMode=2775
 LogsDirectory=librevm
-LogsDirectoryMode=0775
+LogsDirectoryMode=2775
+ExecStartPost=/bin/sh -c 'chgrp -R librevm /var/lib/librevm /run/librevm 2>/dev/null; chmod -R g+rwX /var/lib/librevm /run/librevm 2>/dev/null; exit 0'
 
 # A daemon that walks a store and runs crosvm does not need the rest of the machine.
 NoNewPrivileges=yes
@@ -38,7 +45,11 @@ RestrictSUIDSGID=yes
 # crosvm itself gets --disable-sandbox, so the daemon must be able to create the
 # namespaces and devices a VM needs.
 RestrictNamespaces=no
+# /dev/gunyah for crosvm, and /dev/net/tun because the guest network is built on a tap.
+# With DevicePolicy=closed, a device not listed here cannot be opened at all, which is
+# what made `ip tuntap add` fail with EPERM inside the daemon while working from a shell.
 DeviceAllow=/dev/gunyah rw
+DeviceAllow=/dev/net/tun rw
 DevicePolicy=closed
 # The console hubs spawn crosvm, which wants a good deal of the system.
 SystemCallFilter=@system-service
