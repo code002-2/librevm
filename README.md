@@ -41,9 +41,49 @@ librevm 的目标是：**把「在这台机器上开一个虚拟机」变成点�
 | 中英双语界面 + 语言切换 | ✅ 可用 |
 | Gunyah 安装脚本（校验 vermagic 与 BTI） | ✅ 可用 |
 | 首次启动检测 Gunyah 并引导安装 | ✅ 可用 |
-| 客户机网络（virtio-net） | ❌ 未完成 |
-| 磁盘（virtio-blk） | ❌ 未开始 |
+| 控制台里的终端仿真（颜色、光标、清屏） | ✅ 可用 |
+| 磁盘镜像管理（创建 / 扩容 / 克隆 / 检查） | ✅ 可用 |
+| 共享目录定义（virtio-9p） | ✅ 已定义 |
+| 客户机网络（virtio-net） | ❌ 不可用，见下 |
+| 磁盘接入客户机（virtio-blk） | ❌ 不可用，见下 |
 | D-Bus daemon（GUI 以普通用户运行） | ❌ 未开始 |
+
+### virtio 在 Gunyah 上不可用
+
+**Gunyah 上通过 crosvm 运行的所有 virtio 设备都会崩**：客户机的驱动一
+操作 virtqueue，crosvm 就收到 `SIGBUS`（退出码 135）。
+
+这不是没试过，而是试过两次并且做过对照：
+
+| 客户机驱动 | 设备在 PCI 上 | 结果 |
+| --- | --- | --- |
+| 无 | virtio-blk | 正常启动，`exit=0` |
+| virtio-net | virtio-net | `SIGBUS`，`exit=135` |
+| virtio-blk | virtio-blk | `SIGBUS`，`exit=135` |
+
+第二行说明**设备存在本身无害**，第三行说明**问题出在驱动真的去读写队列时**。
+
+原因：crosvm 要读客户机内存才能处理 virtqueue，而在 Gunyah 上这块内存是
+**借出（lent）** 给虚拟机的，宿主读不了；读就崩。而这块设备的 resource
+manager 直接拒绝 `SET_USER_MEM_REGION`（返回 `ENODEV`），所以只能走借出
+那条路，没有"还回来"的 ioctl。
+
+DroidVM 靠一个 **pseudo-unprotected** 模式绕开：先借出骗过 resource
+manager，再用 `GUNYAH_MEM_FORCE_SHARE` 把窗口要回宿主。那是给 crosvm 打
+补丁。我写了这个补丁并且能编过，但这个 resource manager 依旧返回
+`ENODEV` —— 唯一能带 `GUNYAH_MEM_FORCE_SHARE` 的 ioctl 是
+`GH_VM_ANDROID_MAP_CMA_MEM`，它只对 file-backed 区域有效，普通客户机
+RAM 用不上。而且反复尝试会让驱动在
+`drivers/virt/gunyah/vm_mgr.c:1160` 报 WARNING，多来几次 resource
+manager 就拒绝新虚拟机，直到重启。**该补丁已全部回滚，仓库里的 crosvm
+是干净的。**
+
+详细记录见 [docs/virtio-on-gunyah.md](docs/virtio-on-gunyah.md)。
+
+**所以：控制台能用（串口走 Unix socket，不碰客户机内存），凡是在 virtio
+后面的都不能用。** 要真正解决，得改 Qualcomm 的 Gunyah 驱动。这个仓库里
+磁盘镜像、共享目录这些东西都已经就位，等宿主能重新读客户机内存的那天就能
+直接用。
 
 ## 构建
 
