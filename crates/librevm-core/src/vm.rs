@@ -183,36 +183,23 @@ pub fn start(store: &Store, name: &str) -> Result<i32> {
     Ok(pid)
 }
 
-/// The environment a GPU needs, and nothing when there is no GPU.
+/// The Wayland socket a GPU should draw on.
 ///
-/// crosvm opens the display by name, through `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`. The
-/// daemon runs as root and has neither, so a GPU-enabled machine started from the window or
-/// from `librevm start` would fail to open a display with a message that says only
-/// "unsupported by the implementation". Handing it the session's own variables is what makes
-/// a window appear.
+/// crosvm needs *both* a `--wayland-sock` argument and the `XDG_RUNTIME_DIR` /
+/// `WAYLAND_DISPLAY` environment: the argument is what selects the Wayland backend, and the
+/// environment is how the backend then finds the socket. Giving only the environment leaves
+/// crosvm on its default backend, which fails with "unsupported by the implementation" --
+/// a message that reads like a missing feature but means a missing argument.
 ///
-/// The session is found rather than assumed: the first user with a Wayland socket under
-/// `/run/user` wins, which on a single-seat device is the one at the screen.
-fn gpu_environment(vm: &VmConfig) -> Vec<(String, String)> {
-    if !vm.gpu.enabled {
-        return Vec::new();
-    }
-
-    // An explicit socket in the definition beats any search.
+/// The session is found rather than assumed: the first user id at or above 1000 with a
+/// `wayland-*` socket under `/run/user` wins, which on a single-seat device is the one at
+/// the screen. An explicit path in the definition beats any search.
+pub fn wayland_socket(vm: &VmConfig) -> Option<std::path::PathBuf> {
     if let Some(sock) = &vm.gpu.wayland_sock {
-        let mut env = Vec::new();
-        if let Some(dir) = sock.parent() {
-            env.push(("XDG_RUNTIME_DIR".to_string(), dir.display().to_string()));
-        }
-        if let Some(name) = sock.file_name() {
-            env.push(("WAYLAND_DISPLAY".to_string(), name.to_string_lossy().into_owned()));
-        }
-        return env;
+        return Some(sock.clone());
     }
 
-    let Ok(entries) = std::fs::read_dir("/run/user") else {
-        return Vec::new();
-    };
+    let entries = std::fs::read_dir("/run/user").ok()?;
     let mut ids: Vec<u32> = entries
         .flatten()
         .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
@@ -232,13 +219,28 @@ fn gpu_environment(vm: &VmConfig) -> Vec<(String, String)> {
             .collect();
         sockets.sort();
         if let Some(name) = sockets.into_iter().next() {
-            return vec![
-                ("XDG_RUNTIME_DIR".to_string(), dir.display().to_string()),
-                ("WAYLAND_DISPLAY".to_string(), name),
-            ];
+            return Some(dir.join(name));
         }
     }
-    Vec::new()
+    None
+}
+
+/// The environment a GPU needs, and nothing when there is no GPU.
+fn gpu_environment(vm: &VmConfig) -> Vec<(String, String)> {
+    if !vm.gpu.enabled {
+        return Vec::new();
+    }
+    let Some(sock) = wayland_socket(vm) else {
+        return Vec::new();
+    };
+    let mut env = Vec::new();
+    if let Some(dir) = sock.parent() {
+        env.push(("XDG_RUNTIME_DIR".to_string(), dir.display().to_string()));
+    }
+    if let Some(name) = sock.file_name() {
+        env.push(("WAYLAND_DISPLAY".to_string(), name.to_string_lossy().into_owned()));
+    }
+    env
 }
 
 /// Run a VM in the foreground, with its console on our stdout.

@@ -501,7 +501,8 @@ pub struct GpuConfig {
     pub backend: String,
 
     /// Width and height of the window. Zero means "let the guest choose", which is what a
-    /// kernel with fbdev emulation does on its own.
+    /// kernel with fbdev emulation does on its own. Both or neither: a size with only one
+    /// of the pair is not a window crosvm can describe.
     #[serde(default)]
     pub width: u32,
 

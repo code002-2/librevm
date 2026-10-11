@@ -310,14 +310,31 @@ pub fn build_command(
     //   text console has a connected output and no window, which is correct rather than a
     //   fault to chase.
     if vm.gpu.enabled {
+        // The display has to be described through `displays`, not through the older
+        // `width`/`height` pair. Those still parse, and crosvm warns that they are
+        // deprecated -- but a machine configured with them opens the wayland connection,
+        // creates no window, and reports nothing wrong, which is a very quiet way to fail.
+        //
+        // The shape of the value is awkward and was found by bisection:
+        //   displays=[[mode=windowed[W,H]]]
+        // Two levels of list, and the size attached to the `mode` key rather than to the
+        // display. `displays=[[windowed]]` is rejected with "expected '['", and
+        // `displays=[[mode=windowed]]` likewise: the size is not optional.
         let mut gpu = format!("backend={}", vm.gpu.backend);
         if vm.gpu.width > 0 && vm.gpu.height > 0 {
-            gpu.push_str(&format!(",width={},height={}", vm.gpu.width, vm.gpu.height));
+            gpu.push_str(&format!(
+                ",displays=[[mode=windowed[{},{}]]]",
+                vm.gpu.width, vm.gpu.height
+            ));
         }
         args.push("--gpu".to_string());
         args.push(gpu);
 
-        if let Some(sock) = &vm.gpu.wayland_sock {
+        // The socket is what selects the Wayland backend. Without it crosvm stays on its
+        // default and reports "unsupported by the implementation", which sounds like a
+        // missing feature and is really a missing argument. The environment is set where
+        // the child is spawned; both are needed.
+        if let Some(sock) = crate::vm::wayland_socket(vm) {
             args.push("--wayland-sock".to_string());
             args.push(sock.display().to_string());
         }
