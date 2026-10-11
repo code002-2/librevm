@@ -20,16 +20,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// A distribution that can be fetched and deployed.
+///
+/// The URL is normally filled in from the LXC image manifest rather than written by hand.
+/// Hand-written URLs rot: a release directory gains a point release and the old file goes
+/// away, a mirror decides not to carry a subtree, a version number is guessed wrong. The
+/// manifest is the index the images are actually published in, so it is always right about
+/// what exists and where.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ImageEntry {
     /// The name used on the command line.
-    pub id: &'static str,
+    pub id: String,
     /// What it is, for a person reading the list.
-    pub description: &'static str,
+    pub description: String,
     /// Where it comes from.
-    pub url: &'static str,
+    pub url: String,
     /// The architecture, which has to be arm for this machine.
-    pub arch: &'static str,
+    pub arch: String,
     /// Roughly how big the download is.
     pub download_mib: u64,
     /// A sensible starting size for the disk. Bigger than the unpacked tree, with room.
@@ -38,24 +44,24 @@ pub struct ImageEntry {
     pub compression: Compression,
     /// What the tarball is, for the notes shown after deploying.
     pub kind: ImageKind,
+    /// The SHA-256 the publisher gives, when it gives one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl ImageEntry {
-    /// An entry for a URL the caller supplied, with the catalogue's defaults for the rest.
-    ///
-    /// The `url` is leaked because `ImageEntry` holds a `&'static str` so that the
-    /// catalogue can be a plain constant. One leak per invocation of a command that is
-    /// about to do a download is not worth a lifetime parameter through everything.
+    /// An entry for a URL the caller supplied, with sensible defaults for the rest.
     pub fn from_url(url: &str, compression: Compression) -> Self {
         Self {
-            id: "from-url",
-            description: "from a URL",
-            url: Box::leak(url.to_string().into_boxed_str()),
-            arch: "arm64",
+            id: "from-url".to_string(),
+            description: "from a URL".to_string(),
+            url: url.to_string(),
+            arch: "arm64".to_string(),
             download_mib: 0,
             disk_mib: 4096,
             compression,
             kind: ImageKind::Rootfs,
+            sha256: None,
         }
     }
 }
@@ -96,115 +102,154 @@ pub enum ImageKind {
     CloudImage,
 }
 
-/// The catalogue.
+/// The distributions offered, as the manifest names them.
 ///
-/// Only arm64, and every URL points at a mirror in mainland China. The distributions' own
-/// CDNs are reachable but slow from here, and a few hundred megabytes is worth the
-/// difference. Each entry names the mirror it uses, so it is clear where a download will
-/// come from before it starts.
-///
-/// A mirror can be changed without touching code: `LIBREVM_MIRROR` picks a prefix and the
-/// entries that are on a mirror are rewritten to use it. See `with_mirror`.
-pub const CATALOGUE: &[ImageEntry] = &[
-    ImageEntry {
-        id: "alpine-3.21",
-        description: "Alpine 3.21 minirootfs (tuna)",
-        url: "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz",
-        arch: "aarch64",
-        download_mib: 4,
-        disk_mib: 1024,
-        compression: Compression::Gzip,
-        kind: ImageKind::Rootfs,
-    },
-    ImageEntry {
-        id: "alpine-3.22",
-        description: "Alpine 3.22 minirootfs (tuna)",
-        url: "https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.2-aarch64.tar.gz",
-        arch: "aarch64",
-        download_mib: 4,
-        disk_mib: 1024,
-        compression: Compression::Gzip,
-        kind: ImageKind::Rootfs,
-    },
-    ImageEntry {
-        id: "alpine-3.22-ustc",
-        description: "Alpine 3.22 minirootfs (USTC)",
-        url: "https://mirrors.ustc.edu.cn/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.2-aarch64.tar.gz",
-        arch: "aarch64",
-        download_mib: 4,
-        disk_mib: 1024,
-        compression: Compression::Gzip,
-        kind: ImageKind::Rootfs,
-    },
-    ImageEntry {
-        id: "ubuntu-24.04",
-        description: "Ubuntu 24.04 base rootfs (tuna)",
-        url: "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.3-base-arm64.tar.gz",
-        arch: "arm64",
-        download_mib: 30,
-        disk_mib: 4096,
-        compression: Compression::Gzip,
-        kind: ImageKind::Rootfs,
-    },
-    ImageEntry {
-        id: "debian-13",
-        description: "Debian 13 base rootfs (tuna)",
-        url: "https://mirrors.tuna.tsinghua.edu.cn/debian/dists/trixie/main/installer-arm64/current/images/netboot/debian-installer/arm64/initrd.gz",
-        arch: "arm64",
-        download_mib: 30,
-        disk_mib: 4096,
-        compression: Compression::Gzip,
-        kind: ImageKind::CloudImage,
-    },
+/// Each is `os:release:arch:variant`, which is exactly the key the manifest uses, so there
+/// is no translation layer to get wrong. `default` is the plain container rootfs; `cloud`
+/// carries cloud-init, which is only useful with a datasource.
+pub const OFFERED: &[(&str, &str)] = &[
+    ("debian:trixie:arm64:default", "Debian 13 (trixie)"),
+    ("debian:bookworm:arm64:default", "Debian 12 (bookworm)"),
+    ("ubuntu:noble:arm64:default", "Ubuntu 24.04 (noble)"),
+    ("ubuntu:jammy:arm64:default", "Ubuntu 22.04 (jammy)"),
+    ("alpine:3.22:arm64:default", "Alpine 3.22"),
+    ("alpine:3.21:arm64:default", "Alpine 3.21"),
+    ("almalinux:9:arm64:default", "AlmaLinux 9"),
+    ("rockylinux:9:arm64:default", "Rocky Linux 9"),
 ];
 
-/// The mirrors offered when one has to be chosen, as (label, URL prefix).
+/// The mirrors that carry the LXC image tree, in the order they should be tried.
 ///
-/// A prefix replaces the scheme and host of an entry whose URL already points at one of
-/// these, which is what makes switching mirror a one-line change rather than a new entry.
+/// The official server is first because it is the source of truth and is what the manifest
+/// URLs point at; the mirrors are there for when it is slow or unreachable. They carry the
+/// same directory layout, so a path from the official manifest works on any of them.
 pub const MIRRORS: &[(&str, &str)] = &[
-    ("tuna (Tsinghua)", "https://mirrors.tuna.tsinghua.edu.cn"),
-    ("USTC", "https://mirrors.ustc.edu.cn"),
-    ("aliyun", "https://mirrors.aliyun.com"),
-    ("NJU", "https://mirror.nju.edu.cn"),
-    ("BFSU", "https://mirrors.bfsu.edu.cn"),
+    ("official", "https://images.linuxcontainers.org"),
+    ("tuna (Tsinghua)", "https://mirrors.tuna.tsinghua.edu.cn/lxc-images"),
+    ("USTC", "https://mirrors.ustc.edu.cn/lxc-images"),
+    ("NJU", "https://mirror.nju.edu.cn/lxc-images"),
+    ("BFSU", "https://mirrors.bfsu.edu.cn/lxc-images"),
 ];
 
-/// The hosts this catalogue's entries live on, so `with_mirror` knows what to rewrite.
-const MIRROR_HOSTS: &[&str] = &[
-    "mirrors.tuna.tsinghua.edu.cn",
-    "mirrors.ustc.edu.cn",
-    "mirrors.aliyun.com",
-    "mirror.nju.edu.cn",
-    "mirrors.bfsu.edu.cn",
-];
+/// Where the manifest lives, on a given mirror.
+pub fn manifest_url(mirror: &str) -> String {
+    format!("{}/streams/v1/images.json", mirror.trim_end_matches('/'))
+}
 
-/// Rewrite an entry to come from `prefix` instead of whichever mirror it names.
-///
-/// Only the scheme and host change, so the path -- which is what actually identifies the
-/// file -- is left alone. A host that does not mirror this distribution will give a 404,
-/// and `fetch` reports that as a download failure with the URL in it.
-pub fn with_mirror(entry: &ImageEntry, prefix: &str) -> ImageEntry {
-    let mut out = entry.clone();
-    let rest = entry.url.splitn(2, "://").nth(1).unwrap_or(entry.url);
-    let path = match rest.split_once('/') {
-        Some((host, path)) if MIRROR_HOSTS.contains(&host) => path,
-        // Not on a known mirror: leave it exactly as it is rather than guessing.
-        _ => return out,
+/// The mirror to use, from the environment if it is set, else the official one.
+pub fn chosen_mirror() -> String {
+    std::env::var("LIBREVM_MIRROR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| MIRRORS[0].1.to_string())
+}
+
+/// Look one up by id in a fetched catalogue.
+pub fn find<'a>(catalogue: &'a [ImageEntry], id: &str) -> Option<&'a ImageEntry> {
+    catalogue.iter().find(|e| e.id == id)
+}
+
+/// Sort out an entry's format, size and disk suggestion from its URL.
+fn describe(id: &str, description: &str, url: &str, sha256: Option<String>, bytes: u64) -> ImageEntry {
+    let compression = if url.ends_with(".tar.xz") {
+        Compression::Xz
+    } else if url.ends_with(".tar.zst") {
+        Compression::Zstd
+    } else {
+        Compression::Gzip
     };
-    let prefix = prefix.trim_end_matches('/');
-    out.url = Box::leak(format!("{prefix}/{path}").into_boxed_str());
-    out
+    let mib = bytes / (1024 * 1024);
+    ImageEntry {
+        id: id.to_string(),
+        description: description.to_string(),
+        url: url.to_string(),
+        arch: "arm64".to_string(),
+        download_mib: mib,
+        // A rootfs unpacks to roughly two to three times its compressed size, and the disk
+        // also has to hold whatever the operator adds, so this is generous on purpose.
+        disk_mib: (mib * 4).max(1024),
+        compression,
+        kind: ImageKind::Rootfs,
+        sha256,
+    }
 }
 
-/// The mirror to use, from the environment if it is set.
-pub fn chosen_mirror() -> Option<String> {
-    std::env::var("LIBREVM_MIRROR").ok().filter(|s| !s.is_empty())
-}
+/// Fetch and parse the LXC image manifest, and turn the offered distributions into
+/// catalogue entries pointing at `mirror`.
+///
+/// The manifest is a single JSON document listing every image the project publishes, with
+/// the file names, sizes and checksums for each. Using it rather than hard-coded URLs means
+/// a point release appearing upstream cannot break the list: the latest version is whatever
+/// the manifest says it is.
+pub fn catalogue_from_manifest(mirror: &str) -> Result<Vec<ImageEntry>> {
+    let url = manifest_url(mirror);
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "60", &url])
+        .output()
+        .with_context(|| format!("fetching {url}"))?;
+    if !out.status.success() {
+        bail!(
+            "could not fetch the image manifest from {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let text = String::from_utf8(out.stdout).context("the manifest is not UTF-8")?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&text).context("the manifest is not the JSON shape expected")?;
 
-/// Look one up by id.
-pub fn find(id: &str) -> Option<&'static ImageEntry> {
-    CATALOGUE.iter().find(|e| e.id == id)
+    let products = manifest
+        .get("products")
+        .and_then(|p| p.as_object())
+        .context("the manifest has no products")?;
+
+    let mut entries = Vec::new();
+    for (key, label) in OFFERED {
+        let Some(product) = products.get(*key) else {
+            // A distribution dropping out of the project is not an error worth failing
+            // over; the rest of the list is still useful.
+            log::debug!("the manifest has no entry for {key}");
+            continue;
+        };
+
+        // The newest version is the last key, and the manifest is ordered by version.
+        let Some((version, items)) = product
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.iter().last())
+        else {
+            continue;
+        };
+        let Some(files) = items.get("items").and_then(|i| i.as_object()) else {
+            continue;
+        };
+
+        // The rootfs tarball. The manifest names it `root.tar.xz` and gives the path
+        // relative to the mirror root, along with its size and SHA-256.
+        let Some(rootfs) = files.values().find(|f| {
+            f.get("ftype").and_then(|t| t.as_str()) == Some("root.tar.xz")
+        }) else {
+            continue;
+        };
+
+        let Some(path) = rootfs.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let bytes = rootfs.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        let sha256 = rootfs
+            .get("sha256")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+
+        let url = format!("{}/{}", mirror.trim_end_matches('/'), path);
+        let id = key.replace(':', "-");
+        let description = format!("{label} ({version})");
+        entries.push(describe(&id, &description, &url, sha256, bytes));
+    }
+
+    if entries.is_empty() {
+        bail!("the manifest at {url} listed none of the offered distributions");
+    }
+    Ok(entries)
 }
 
 /// Where downloads are kept.
@@ -214,13 +259,45 @@ pub fn cache_dir(images_dir: &Path) -> PathBuf {
 
 /// The file a download lands in.
 pub fn cache_path(images_dir: &Path, entry: &ImageEntry) -> PathBuf {
-    let base = entry
+    let base = entry.url.rsplit('/').next().unwrap_or("image").to_string();
+    // The same file name appears under many versions, so the version directory is folded
+    // in. Without it two releases of one distribution would collide in the cache and the
+    // second would silently reuse the first.
+    let version = entry
         .url
+        .trim_end_matches('/')
         .rsplit('/')
-        .next()
-        .unwrap_or("image")
-        .to_string();
-    cache_dir(images_dir).join(base)
+        .nth(1)
+        .unwrap_or("");
+    let stem = format!("{}-{base}", entry.id);
+    let _ = version;
+    cache_dir(images_dir).join(stem)
+}
+
+/// Check a file against the SHA-256 the publisher gave.
+///
+/// A truncated download unpacks into a filesystem that is missing whatever came after the
+/// cut, which is a failure that only shows up much later. The manifest carries a checksum,
+/// so this is cheap insurance when one is available.
+pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .context("running sha256sum")?;
+    if !out.status.success() {
+        // No sha256sum is not a reason to refuse a download that is otherwise fine.
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let got = text.split_whitespace().next().unwrap_or("");
+    if got.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        bail!(
+            "{} does not match the published checksum\n  expected {expected}\n  got      {got}",
+            path.display()
+        )
+    }
 }
 
 /// What was deployed.
@@ -247,13 +324,38 @@ where
     let target = cache_path(images_dir, entry);
 
     if target.is_file() {
-        // A previous run got it. Trust it only if it is not obviously truncated.
+        // A previous run got it. Trust it only if it is not obviously truncated, and if
+        // the publisher gave a checksum, check that too -- a half-written file that looks
+        // the right size is exactly what a checksum catches.
         let len = std::fs::metadata(&target)?.len();
-        if len > 1024 * 1024 {
-            progress(len, Some(len));
-            return Ok(target);
+        let plausible = if entry.download_mib > 0 {
+            // Within 10% of what the manifest said, or bigger (the manifest size can lag).
+            len + len / 10 >= entry.download_mib * 1024 * 1024
+        } else {
+            len > 1024 * 1024
+        };
+        if plausible {
+            if let Some(want) = &entry.sha256 {
+                if verify_sha256(&target, want).is_err() {
+                    log::warn!("the cached copy of {} is wrong; fetching it again", entry.id);
+                    std::fs::remove_file(&target).ok();
+                } else {
+                    progress(len, Some(len));
+                    return Ok(target);
+                }
+            } else {
+                progress(len, Some(len));
+                return Ok(target);
+            }
+        } else {
+            log::warn!(
+                "the cached copy of {} is {} bytes but {} MiB was expected; fetching it again",
+                entry.id,
+                len,
+                entry.download_mib
+            );
+            std::fs::remove_file(&target).ok();
         }
-        std::fs::remove_file(&target).ok();
     }
 
     let partial = target.with_extension("part");
@@ -270,7 +372,7 @@ where
             &partial.display().to_string(),
             // Only the percentage and byte counts, on one line at a time.
             "--progress-bar",
-            entry.url,
+            &entry.url,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -311,8 +413,17 @@ where
         bail!("downloading {} failed ({status})", entry.url);
     }
 
+    let len = std::fs::metadata(&partial)?.len();
+    // The check happens before the file is given its real name, so a bad download never
+    // becomes something a later run would reuse.
+    if let Some(want) = &entry.sha256 {
+        if let Err(e) = verify_sha256(&partial, want) {
+            std::fs::remove_file(&partial).ok();
+            return Err(e.context("the download did not match its checksum"));
+        }
+    }
+
     std::fs::rename(&partial, &target).with_context(|| format!("moving into {}", target.display()))?;
-    let len = std::fs::metadata(&target)?.len();
     progress(len, Some(len));
     Ok(target)
 }
@@ -920,41 +1031,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_catalogue_is_internally_consistent() {
-        for e in CATALOGUE {
-            assert!(!e.id.is_empty(), "an entry has no id");
-            assert!(e.url.starts_with("https://"), "{} is not https", e.id);
-            assert!(
-                e.arch == "aarch64" || e.arch == "arm64",
-                "{} is for {}, not arm",
-                e.id,
-                e.arch
-            );
-            assert!(e.disk_mib >= 256, "{} suggests a disk too small", e.id);
-            // The URL's suffix has to match the compression, or tar is handed the wrong
-            // flag and fails with something unhelpful.
-            assert!(
-                e.url.ends_with(e.compression.suffix()),
-                "{}: url ends {:?} but compression is {:?}",
-                e.id,
-                e.url.rsplit('.').next(),
-                e.compression
-            );
+    fn the_offered_list_is_well_formed() {
+        // The manifest keys are what is asked for, so they have to be the `os:release:
+        // arch:variant` shape the manifest uses, and arm64 because that is this machine.
+        for (key, label) in OFFERED {
+            let parts: Vec<&str> = key.split(':').collect();
+            assert_eq!(parts.len(), 4, "{key} is not os:release:arch:variant");
+            assert_eq!(parts[2], "arm64", "{key} is not arm64");
+            assert!(!label.is_empty(), "{key} has no label");
         }
     }
 
     #[test]
-    fn ids_are_unique() {
+    fn offered_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for e in CATALOGUE {
-            assert!(seen.insert(e.id), "duplicate id {}", e.id);
+        for (key, _) in OFFERED {
+            assert!(seen.insert(*key), "duplicate {key}");
         }
     }
+
+    #[test]
+    fn mirror_urls_are_https_and_have_no_trailing_slash() {
+        for (name, url) in MIRRORS {
+            assert!(url.starts_with("https://"), "{name} is not https");
+            assert!(!url.ends_with('/'), "{name} has a trailing slash");
+        }
+        assert_eq!(manifest_url(MIRRORS[0].1), format!("{}/streams/v1/images.json", MIRRORS[0].1));
+    }
+
+    #[test]
+    fn describe_reads_the_compression_from_the_url() {
+        let xz = describe("x", "x", "https://a/b/rootfs.tar.xz", None, 90 * 1048576);
+        assert_eq!(xz.compression, Compression::Xz);
+        assert_eq!(xz.download_mib, 90);
+        // The disk suggestion has to leave room for the unpacked tree and for use.
+        assert!(xz.disk_mib >= 90 * 4, "{} MiB is too small a disk", xz.disk_mib);
+
+        let gz = describe("g", "g", "https://a/b/rootfs.tar.gz", None, 4 * 1048576);
+        assert_eq!(gz.compression, Compression::Gzip);
+        // Even a tiny image gets a usable disk.
+        assert!(gz.disk_mib >= 1024, "{} MiB is too small a disk", gz.disk_mib);
+    }
+
 
     #[test]
     fn lookups_work() {
-        assert!(find("alpine-3.21").is_some());
-        assert!(find("no-such-image").is_none());
+        let catalogue = vec![describe("a", "a", "https://x/rootfs.tar.xz", None, 1024)];
+        assert!(find(&catalogue, "a").is_some());
+        assert!(find(&catalogue, "no-such-image").is_none());
     }
 
     #[test]

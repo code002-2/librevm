@@ -1,7 +1,7 @@
 //! The images page.
 //!
 //! Two lists and a button. The first list is what can be fetched, from the mirrors in
-//! `image::CATALOGUE`; the second is what has been deployed. Deploying does the whole job
+//! an LXC mirror's manifest; the second is what has been deployed. Deploying does the whole job
 //! in one call -- download, filesystem, unpack, key injection -- so the page's only real
 //! work is to stay responsive while the daemon does it and to report what came back.
 //!
@@ -192,16 +192,10 @@ fn load(
 ) {
     let catalogue = match bridge.client() {
         Some(c) => c.image_catalogue(),
+        // With no daemon there is no manifest fetch either, so the page says so
+        // rather than showing a list that cannot be deployed.
         None => Ok(serde_json::json!({
-            "images": librevm_core::image::CATALOGUE.iter().map(|e| serde_json::json!({
-                "id": e.id,
-                "description": e.description,
-                "url": e.url,
-                "download_mib": e.download_mib,
-                "disk_mib": e.disk_mib,
-                "cached": false,
-                "mirrored": false,
-            })).collect::<Vec<_>>(),
+            "images": [],
             "mirrors": librevm_core::image::MIRRORS.iter()
                 .map(|(n, u)| serde_json::json!({ "name": n, "url": u }))
                 .collect::<Vec<_>>(),

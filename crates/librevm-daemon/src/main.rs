@@ -349,38 +349,40 @@ impl Daemon {
         }))
     }
 
-    /// The images that can be fetched, with whichever mirror is in force.
+    /// The images that can be fetched, from the mirror's manifest.
     async fn image_catalogue(&self) -> String {
-        let chosen = librevm_core::image::chosen_mirror();
-        let entries: Vec<serde_json::Value> = librevm_core::image::CATALOGUE
-            .iter()
-            .map(|e| {
-                let effective = match &chosen {
-                    Some(m) => librevm_core::image::with_mirror(e, m),
-                    None => e.clone(),
-                };
-                serde_json::json!({
-                    "id": e.id,
-                    "description": e.description,
-                    "url": effective.url,
-                    "original_url": e.url,
-                    "arch": e.arch,
-                    "download_mib": e.download_mib,
-                    "disk_mib": e.disk_mib,
-                    "mirrored": effective.url != e.url,
-                    "cached": librevm_core::image::cache_path(&self.store.images_dir(), &effective).is_file(),
-                })
-            })
-            .collect();
-        to_json(&serde_json::json!({
-            "ok": true,
-            "mirror": chosen,
-            "mirrors": librevm_core::image::MIRRORS
-                .iter()
-                .map(|(n, u)| serde_json::json!({ "name": n, "url": u }))
-                .collect::<Vec<_>>(),
-            "images": entries,
-        }))
+        let mirror = librevm_core::image::chosen_mirror();
+        match librevm_core::image::catalogue_from_manifest(&mirror) {
+            Ok(catalogue) => {
+                let entries: Vec<serde_json::Value> = catalogue
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id": e.id,
+                            "description": e.description,
+                            "url": e.url,
+                            "arch": e.arch,
+                            "download_mib": e.download_mib,
+                            "disk_mib": e.disk_mib,
+                            "mirrored": false,
+                            "cached": librevm_core::image::cache_path(&self.store.images_dir(), e).is_file(),
+                        })
+                    })
+                    .collect();
+                to_json(&serde_json::json!({
+                    "ok": true,
+                    "mirror": mirror,
+                    "mirrors": librevm_core::image::MIRRORS
+                        .iter()
+                        .map(|(n, u)| serde_json::json!({ "name": n, "url": u }))
+                        .collect::<Vec<_>>(),
+                    "images": entries,
+                }))
+            }
+            // The list depends on a network fetch, so it can fail; saying why is more use
+            // than an empty list.
+            Err(e) => error_json(&e),
+        }
     }
 
     /// Download an image and turn it into a disk, optionally attaching it to a machine.
@@ -397,12 +399,12 @@ impl Daemon {
         as_root: bool,
     ) -> String {
         let result = (|| -> Result<serde_json::Value> {
-            let entry = librevm_core::image::find(&id)
-                .with_context(|| format!("no image called {id}"))?;
-            let effective = match librevm_core::image::chosen_mirror() {
-                Some(m) => librevm_core::image::with_mirror(entry, &m),
-                None => entry.clone(),
-            };
+            let mirror = librevm_core::image::chosen_mirror();
+            let catalogue = librevm_core::image::catalogue_from_manifest(&mirror)
+                .with_context(|| format!("reading the image manifest from {mirror}"))?;
+            let entry = librevm_core::image::find(&catalogue, &id)
+                .with_context(|| format!("no image called {id}"))?
+                .clone();
 
             // The key has to exist before the image is built, because it goes into it.
             let key = librevm_core::ssh::ensure_keypair(self.store.root())?;
@@ -410,7 +412,7 @@ impl Daemon {
 
             let deployed = librevm_core::image::deploy(
                 &self.store.images_dir(),
-                &effective,
+                &entry,
                 &name,
                 if size_mib > 0 { Some(size_mib) } else { None },
                 &librevm_core::image::Injections {

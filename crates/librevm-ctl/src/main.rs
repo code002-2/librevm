@@ -707,17 +707,21 @@ fn parse_serial_backend(text: &str) -> Result<SerialBackend> {
 fn cmd_image(store: &Store, action: &ImageCommand) -> Result<()> {
     match action {
         ImageCommand::List => {
+            println!("fetching the image manifest...");
+            let mirror = librevm_core::image::chosen_mirror();
+            let catalogue = librevm_core::image::catalogue_from_manifest(&mirror)?;
             println!(
-                "{:<16} {:>8} {:>9}  {}",
+                "{:<26} {:>10} {:>9}  {}",
                 "ID", "DOWNLOAD", "DISK", "DESCRIPTION"
             );
-            for e in librevm_core::image::CATALOGUE {
+            for e in &catalogue {
                 println!(
-                    "{:<16} {:>6} M {:>7} M  {}",
+                    "{:<26} {:>7} M {:>6} M  {}",
                     e.id, e.download_mib, e.disk_mib, e.description
                 );
             }
             println!();
+            println!("mirror: {mirror}   (change with LIBREVM_MIRROR)");
             println!("Deploy one with: librevm image fetch <id> --name <name>");
             Ok(())
         }
@@ -729,8 +733,13 @@ fn cmd_image(store: &Store, action: &ImageCommand) -> Result<()> {
             attach_to,
             as_root,
         } => {
-            let entry = librevm_core::image::find(id)
-                .with_context(|| format!("no image called {id}; try `librevm image list`"))?;
+            // The catalogue comes from the mirror's manifest, so what is offered is always
+            // what the mirror actually has.
+            let mirror = librevm_core::image::chosen_mirror();
+            let catalogue = librevm_core::image::catalogue_from_manifest(&mirror)?;
+            let entry = librevm_core::image::find(&catalogue, id)
+                .with_context(|| format!("no image called {id}; try `librevm image list`"))?
+                .clone();
             let name = name.clone().unwrap_or_else(|| id.clone());
             check_image_name(&name)?;
             let size_mib = match size {
@@ -738,7 +747,7 @@ fn cmd_image(store: &Store, action: &ImageCommand) -> Result<()> {
                 None => None,
             };
 
-            deploy_one(store, entry, &name, size_mib, attach_to.as_deref(), *as_root)
+            deploy_one(store, &entry, &name, size_mib, attach_to.as_deref(), *as_root)
         }
 
         ImageCommand::From {
