@@ -132,7 +132,14 @@ pub fn connection_args(store_root: &Path, address: &str) -> Vec<String> {
 }
 
 /// Run a command in a guest and return its output.
+///
+/// The stale host key is dropped first, for the same reason `connect` does it: a guest that
+/// was redeployed has a new host key, and `StrictHostKeyChecking=accept-new` only accepts a
+/// key it has never seen -- an old entry makes ssh refuse outright, with a warning about
+/// man-in-the-middle attacks that has nothing to do with what happened. Without this,
+/// `ssh check` reported a freshly booted, perfectly reachable guest as unreachable.
 pub fn run(store_root: &Path, address: &str, command: &str) -> Result<String> {
+    forget_host_key(store_root, address);
     let mut args = connection_args(store_root, address);
     args.push(command.to_string());
     let out = Command::new("ssh")
@@ -185,6 +192,7 @@ pub fn connect(store_root: &Path, address: &str, command: Option<&str>) -> Resul
 
 /// Copy a file to a guest.
 pub fn copy(store_root: &Path, address: &str, local: &Path, remote: &str) -> Result<()> {
+    forget_host_key(store_root, address);
     let mut args = connection_args(store_root, address);
     // scp takes the paths after the options, and the destination is host:path.
     let destination = args.pop().context("no destination")?;
