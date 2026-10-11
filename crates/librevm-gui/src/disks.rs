@@ -282,6 +282,7 @@ impl DisksPanel {
                 path: path.clone(),
                 readonly: false,
                 root: false,
+                bus: Default::default(),
                 label: None,
             });
             vm.validate()?;
@@ -359,6 +360,7 @@ impl DisksPanel {
                         path: path.clone(),
                         tag: tag.clone(),
                         readonly: false,
+                        cache: Default::default(),
                     });
                     vm.validate()?;
                     me.store.save(&vm)?;
@@ -445,6 +447,7 @@ impl DisksPanel {
                     path: path.clone(),
                     readonly: false,
                     root: false,
+                    bus: Default::default(),
                     label: None,
                 });
                 vm.validate()?;

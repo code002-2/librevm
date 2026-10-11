@@ -6,8 +6,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use librevm_core::config::{
-    BootConfig, ConsoleConfig, DiskConfig, Hypervisor, HypervisorConfig, Protection,
-    SharedDirConfig, VmConfig,
+    BootConfig, ConsoleConfig, DiskBus, DiskConfig, Hypervisor, HypervisorConfig, Protection,
+    SerialBackend, SharedDirConfig, VmConfig,
 };
 use librevm_core::disk;
 use librevm_core::hub;
@@ -94,6 +94,20 @@ enum Command {
         /// Path to the crosvm binary, if it is somewhere unusual.
         #[arg(long)]
         crosvm: Option<PathBuf>,
+
+        /// Where the guest's console goes: stdout, file:<path>, pty, unix:<path>,
+        /// unix-stream:<path>.
+        ///
+        /// stdout is what a foreground run uses. When the machine is started through the
+        /// hub, the hub's own console socket takes precedence, so this matters for
+        /// `librevm run`.
+        #[arg(long, default_value = "stdout")]
+        serial: String,
+
+        /// Keep the guest kernel's log across reboots, so a crash can be read afterwards.
+        /// The guest needs ramoops configured for it to have anywhere to write.
+        #[arg(long)]
+        pstore: bool,
 
         /// Free-form description.
         #[arg(long)]
@@ -189,13 +203,20 @@ enum DiskCommand {
         #[arg(short, long, default_value = "4G")]
         size: String,
 
-        /// raw or sparse. Raw images are made sparse on disk anyway, so this only
-        /// matters for tools that expect the Android format.
+        /// raw, sparse or qcow2. Raw images are made sparse on disk anyway, so this
+        /// only matters for tools that expect the Android format; qcow2 is the one that
+        /// can carry a backing file.
         #[arg(short, long, default_value = "raw")]
         format: String,
 
+        /// Make this an overlay on an existing qcow2 image: blocks not written here are
+        /// read from the backing file. That is how a snapshot layer is built -- the
+        /// overlay starts empty, and deleting it is the rollback.
+        #[arg(long)]
+        backing: Option<PathBuf>,
+
         /// Also make a filesystem inside it: ext4, ext2 or vfat. Needs root,
-        /// because it attaches the image to a loop device.
+        /// because it attaches the image to a loop device. Not possible on qcow2.
         #[arg(long)]
         fs: Option<String>,
     },
@@ -255,6 +276,10 @@ enum DiskCommand {
         #[arg(long = "root-disk")]
         root_disk: bool,
 
+        /// How to present it: virtio, scsi, pmem or cdrom.
+        #[arg(long, value_enum, default_value_t = BusArg::Virtio)]
+        bus: BusArg,
+
         /// A label for the operator.
         #[arg(long)]
         label: Option<String>,
@@ -286,6 +311,14 @@ enum ShareCommand {    /// Share a directory with a VM.
         /// Share it read-only.
         #[arg(long)]
         readonly: bool,
+
+        /// How much the guest may cache: never, auto or always.
+        ///
+        /// Only meaningful for virtio-fs, which is what these shares use. `auto` gives
+        /// close-to-open consistency, so a file written on the host is seen by the guest
+        /// as soon as it is opened again; `always` is faster and can serve stale data.
+        #[arg(long, value_enum)]
+        cache: Option<CacheArg>,
     },
 
     /// Stop sharing a directory.
@@ -401,6 +434,49 @@ enum NetCommand {    /// Turn networking on for a VM and set the host side up no
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum CacheArg {
+    Never,
+    Auto,
+    Always,
+}
+
+impl From<CacheArg> for librevm_core::config::SharedDirCache {
+    fn from(a: CacheArg) -> Self {
+        use librevm_core::config::SharedDirCache as C;
+        match a {
+            CacheArg::Never => C::Never,
+            CacheArg::Auto => C::Auto,
+            CacheArg::Always => C::Always,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum BusArg {
+    Virtio,
+    Scsi,
+    Pmem,
+    Cdrom,
+}
+
+impl From<BusArg> for DiskBus {
+    fn from(a: BusArg) -> Self {
+        match a {
+            BusArg::Virtio => DiskBus::Virtio,
+            BusArg::Scsi => DiskBus::Scsi,
+            BusArg::Pmem => DiskBus::Pmem,
+            BusArg::Cdrom => DiskBus::Cdrom,
+        }
+    }
+}
+
+impl BusArg {
+    fn name(self) -> &'static str {
+        DiskBus::from(self).name()
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum HypervisorArg {
     Auto,
     Gunyah,
@@ -481,6 +557,8 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
             protection,
             firmware,
             crosvm,
+            serial,
+            pstore,
             description,
         } => cmd_create(
             store,
@@ -495,6 +573,8 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
             (*protection).into(),
             firmware.clone(),
             crosvm.clone(),
+            parse_serial_backend(serial)?,
+            *pstore,
             description.clone(),
         ),
         Command::Show { name } => cmd_show(store, name),
@@ -592,6 +672,34 @@ fn indent(text: &str) -> String {
     text.lines()
         .map(|l| format!("    {l}\n"))
         .collect::<String>()
+}
+
+// -- serial -----------------------------------------------------------------
+
+/// Read the `--serial` value, which is a short form rather than a path on its own.
+///
+/// The shape is `backend` or `backend:path`, because a bare path would be ambiguous with
+/// the name of a backend and a colon cannot appear in either.
+fn parse_serial_backend(text: &str) -> Result<SerialBackend> {
+    let (kind, path) = match text.split_once(':') {
+        Some((k, p)) => (k, Some(p)),
+        None => (text, None),
+    };
+    let need = |what: &str| -> Result<PathBuf> {
+        path.map(PathBuf::from)
+            .with_context(|| format!("{what} needs a path: {what}:<path>"))
+    };
+    Ok(match kind {
+        "stdout" => SerialBackend::Stdout,
+        "pty" => SerialBackend::Pty,
+        "file" => SerialBackend::File(need("file")?),
+        "unix" => SerialBackend::Unix(need("unix")?),
+        "unix-stream" => SerialBackend::UnixStream(need("unix-stream")?),
+        other => bail!(
+            "unknown serial backend {other:?}; try stdout, file:<path>, pty, \
+             unix:<path> or unix-stream:<path>"
+        ),
+    })
 }
 
 // -- images -----------------------------------------------------------------
@@ -923,6 +1031,7 @@ fn attach_image(store: &Store, image: &Path, machine: &str, root: bool) -> Resul
         path: image.to_path_buf(),
         readonly: false,
         root,
+        bus: Default::default(),
         label: Some(label),
     });
     vm.validate()?;
@@ -1070,17 +1179,41 @@ fn host_subnet() -> Result<[u8; 3]> {
 
 fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
     match action {
-        DiskCommand::Create { path, size, format, fs } => {
+        DiskCommand::Create { path, size, format, backing, fs } => {
             let size = disk::parse_size(size)?;
             let format = disk::Format::parse(format)?;
-            let made = disk::create(path, size, format)?;
+
+            // A backing file makes this an overlay, which means the size comes from the
+            // base rather than from the command line.
+            if let Some(base) = backing {
+                if format != disk::Format::Qcow2 {
+                    bail!("only qcow2 can have a backing file; --format qcow2 is needed");
+                }
+                if !base.is_file() {
+                    bail!("backing file {} does not exist", base.display());
+                }
+            }
+
+            let made = disk::create_with_backing(path, size, format, backing.as_deref())?;
 
             println!("created {}", made.path.display());
             println!("  format    : {}", made.format.name());
             println!("  capacity  : {}", disk::human(made.capacity));
             println!("  on disk   : {}", disk::human(made.allocated));
+            if let Some(base) = backing {
+                println!("  backing   : {}", base.display());
+                println!();
+                println!("This is an overlay: it starts empty and reads anything not written");
+                println!("from the base. Deleting it is the rollback.");
+            }
 
             if let Some(kind) = fs {
+                if format == disk::Format::Qcow2 {
+                    bail!(
+                        "a filesystem cannot be written into a qcow2 here: that needs \
+                         qemu-img, which is not installed"
+                    );
+                }
                 if unsafe { libc::geteuid() } != 0 {
                     bail!("making a {kind} filesystem needs root (it uses a loop device)");
                 }
@@ -1195,7 +1328,7 @@ fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
             Ok(())
         }
 
-        DiskCommand::Attach { name, path, readonly, root_disk, label } => {
+        DiskCommand::Attach { name, path, readonly, root_disk, bus, label } => {
             let mut vm = store.load(name)?;
             if !path.exists() {
                 bail!("{} does not exist", path.display());
@@ -1214,6 +1347,7 @@ fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
                 path: path.clone(),
                 readonly: *readonly,
                 root: *root_disk,
+                bus: (*bus).into(),
                 label: label.clone(),
             });
             vm.validate()?;
@@ -1222,6 +1356,7 @@ fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
             println!("attached {} to {name}", path.display());
             println!("  read-only : {}", if *readonly { "yes" } else { "no" });
             println!("  root      : {}", if *root_disk { "yes" } else { "no" });
+            println!("  bus       : {}", bus.name());
             if vm::state(store, name) != State::Stopped {
                 println!("  note: {name} is running; restart it for this to take effect");
             }
@@ -1262,7 +1397,7 @@ fn cmd_disk(store: &Store, action: &DiskCommand) -> Result<()> {
 
 fn cmd_share(store: &Store, action: &ShareCommand) -> Result<()> {
     match action {
-        ShareCommand::Add { name, path, tag, readonly } => {
+        ShareCommand::Add { name, path, tag, readonly, cache } => {
             let mut vm = store.load(name)?;
             if !path.is_dir() {
                 bail!("{} is not a directory", path.display());
@@ -1281,12 +1416,14 @@ fn cmd_share(store: &Store, action: &ShareCommand) -> Result<()> {
                 path: path.clone(),
                 tag: tag.clone(),
                 readonly: *readonly,
+                cache: cache.map(Into::into).unwrap_or_default(),
             });
             vm.validate()?;
             store.save(&vm)?;
 
             println!("sharing {} with {name} as {tag:?}", path.display());
-            println!("  in the guest: mount -t 9p -o trans=virtio,version=9p2000.L {tag} /mnt");
+            // virtio-fs, not 9p: see backend.rs for why the 9p device is not used here.
+            println!("  in the guest: mount -t virtiofs {tag} /mnt");
             if vm::state(store, name) != State::Stopped {
                 println!("  note: {name} is running; restart it for this to take effect");
             }
@@ -1424,6 +1561,8 @@ fn cmd_create(
     protection: Protection,
     firmware: Option<PathBuf>,
     crosvm: Option<PathBuf>,
+    serial: SerialBackend,
+    pstore: bool,
     description: Option<String>,
 ) -> Result<()> {
     if store.exists(name) {
@@ -1455,6 +1594,7 @@ fn cmd_create(
             socket: Some(store.console_socket(name)),
             log: Some(store.console_log(name)),
         },
+        serial: librevm_core::config::SerialConfig { backend: serial, pstore },
         disks: Vec::new(),
         shared_dirs: Vec::new(),
         network: Default::default(),

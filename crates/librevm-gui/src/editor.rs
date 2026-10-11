@@ -216,6 +216,54 @@ where
         .build();
     ssh_group.add(&ssh_button);
 
+    // -- console ----------------------------------------------------------
+    //
+    // Where the serial port goes. stdout is what a foreground run wants; a file is what a
+    // machine nobody is watching wants; a pty is for attaching a terminal by hand.
+    let serial_row = adw::ComboRow::builder()
+        .title(i18n::tr(i18n::Key::SerialBackend))
+        .subtitle(i18n::tr(i18n::Key::SerialBackendHint))
+        .model(&gtk4::StringList::new(&serial_names()))
+        .selected(match &vm.serial.backend {
+            librevm_core::config::SerialBackend::Stdout => 0,
+            librevm_core::config::SerialBackend::File(_) => 1,
+            librevm_core::config::SerialBackend::Pty => 2,
+            librevm_core::config::SerialBackend::Unix(_) => 3,
+            librevm_core::config::SerialBackend::UnixStream(_) => 4,
+        })
+        .build();
+
+    let serial_path_row = adw::EntryRow::builder()
+        .title(i18n::tr(i18n::Key::SerialPath))
+        .text(match &vm.serial.backend {
+            librevm_core::config::SerialBackend::File(p)
+            | librevm_core::config::SerialBackend::Unix(p)
+            | librevm_core::config::SerialBackend::UnixStream(p) => p.display().to_string(),
+            _ => String::new(),
+        })
+        .build();
+
+    let pstore_row = adw::SwitchRow::builder()
+        .title(i18n::tr(i18n::Key::Pstore))
+        .subtitle(i18n::tr(i18n::Key::PstoreHint))
+        .active(vm.serial.pstore)
+        .build();
+
+    // The path only means anything for the backends that take one.
+    {
+        let path = serial_path_row.clone();
+        let update = move |i: u32| path.set_sensitive(matches!(i, 1 | 3 | 4));
+        update(serial_row.selected());
+        serial_row.connect_selected_notify(move |r| update(r.selected()));
+    }
+
+    let serial_group = adw::PreferencesGroup::builder()
+        .title(i18n::tr(i18n::Key::GroupConsole))
+        .build();
+    serial_group.add(&serial_row);
+    serial_group.add(&serial_path_row);
+    serial_group.add(&pstore_row);
+
     // A running machine reads its definition once, at start. Saying so here is better than
     // letting an operator change something and wonder why nothing happened.
     let running = librevm_core::vm::state(&store, &vm.name) != State::Stopped;
@@ -243,6 +291,7 @@ where
     content.append(&boot);
     content.append(&resources);
     content.append(&net);
+    content.append(&serial_group);
     content.append(&disks_group);
     content.append(&ssh_group);
     content.append(&protection_group);
@@ -426,6 +475,7 @@ where
                 path: path.clone(),
                 readonly: false,
                 root,
+                bus: Default::default(),
                 label: Some(label),
             });
             drop(items);
@@ -608,6 +658,26 @@ where
             // than from any widget.
             vm.disks = attached.borrow().clone();
 
+            // The console. A backend that takes no path keeps whatever was there before,
+            // so switching to a pty and back does not lose the file that was configured.
+            let chosen = serial_row.selected();
+            let path = serial_path_row.text().to_string();
+            let path = if path.trim().is_empty() { None } else { Some(std::path::PathBuf::from(path)) };
+            vm.serial.backend = match chosen {
+                1 => librevm_core::config::SerialBackend::File(
+                    path.clone().unwrap_or_else(|| std::path::PathBuf::from("/tmp/librevm-console.log")),
+                ),
+                2 => librevm_core::config::SerialBackend::Pty,
+                3 => librevm_core::config::SerialBackend::Unix(
+                    path.clone().unwrap_or_else(|| std::path::PathBuf::from("/tmp/librevm-console.sock")),
+                ),
+                4 => librevm_core::config::SerialBackend::UnixStream(
+                    path.unwrap_or_else(|| std::path::PathBuf::from("/tmp/librevm-console.sock")),
+                ),
+                _ => librevm_core::config::SerialBackend::Stdout,
+            };
+            vm.serial.pstore = pstore_row.is_active();
+
             // The console socket and log are filled in by the store when missing, so
             // nothing here has to know about them.
             let outcome = vm.validate().and_then(|_| {
@@ -651,6 +721,14 @@ where
     }
 
     dialog.present();
+}
+
+/// The serial backends, in the order the combo row lists them.
+fn serial_names() -> [&'static str; 5] {
+    match i18n::current() {
+        i18n::Lang::En => ["stdout", "file", "pty", "unix datagram", "unix stream"],
+        i18n::Lang::Zh => ["stdout", "文件", "pty", "unix 数据报", "unix 流"],
+    }
 }
 
 fn protection_names() -> [&'static str; 3] {

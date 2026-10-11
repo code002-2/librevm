@@ -237,6 +237,15 @@ pub enum Key {
     SetAsRoot,
     Available,
     GroupSsh,
+
+    // -- the console ------------------------------------------------------
+    GroupConsole,
+    SerialBackend,
+    SerialBackendHint,
+    SerialPath,
+    Pstore,
+    PstoreHint,
+    DiskBus,
 }
 
 impl Key {
@@ -409,6 +418,18 @@ impl Key {
             Key::SetAsRoot => "root",
             Key::Available => "available",
             Key::GroupSsh => "SSH",
+            Key::GroupConsole => "Console",
+            Key::SerialBackend => "Serial output",
+            Key::SerialBackendHint => {
+                "Where the guest's console goes. A machine started through the hub uses the \
+                 hub's own socket instead."
+            }
+            Key::SerialPath => "Path",
+            Key::Pstore => "Keep the kernel log across reboots",
+            Key::PstoreHint => {
+                "Needs ramoops configured in the guest to have anywhere to write."
+            }
+            Key::DiskBus => "Bus",
         }
     }
 
@@ -418,7 +439,6 @@ impl Key {
             Key::NoMachinesTitle => "还没有虚拟机",
             Key::NoMachinesBody => "点上面的 + 号创建一个。",
             Key::CreateVm => "创建虚拟机",
-            Key::Refresh => "刷新",
             Key::Machines => "虚拟机",
             Key::ShowConsole => "显示客户机控制台",
             Key::Details => "详情",
@@ -565,6 +585,13 @@ impl Key {
             Key::SetAsRoot => "根设备",
             Key::Available => "可用",
             Key::GroupSsh => "SSH",
+            Key::GroupConsole => "控制台",
+            Key::SerialBackend => "串口输出",
+            Key::SerialBackendHint => "客户机控制台的去向。经 hub 启动时用它自己的套接字。",
+            Key::SerialPath => "路径",
+            Key::Pstore => "保留上次的内核日志",
+            Key::PstoreHint => "需要客户机配好 ramoops 才有地方写。",
+            Key::DiskBus => "总线",
         }
     }
 }

@@ -153,6 +153,100 @@ impl Default for ConsoleConfig {
     }
 }
 
+/// How a disk is presented to the guest.
+///
+/// virtio-blk is the default and is what the rest of this works with. The others exist
+/// because a real system sometimes needs them: SCSI for a device that only speaks it,
+/// CDROM to attach an ISO, and pmem for a region the guest can map directly rather than
+/// block by block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskBus {
+    /// virtio-blk. The default.
+    Virtio,
+    /// virtio-scsi. Attaches as a SCSI disk.
+    Scsi,
+    /// virtio-pmem. A persistent memory region, mapped rather than read as blocks.
+    Pmem,
+    /// An optical drive. Read-only by nature, so `readonly` is forced on.
+    Cdrom,
+}
+
+impl Default for DiskBus {
+    fn default() -> Self {
+        DiskBus::Virtio
+    }
+}
+
+impl DiskBus {
+    /// Whether the bus can be a root device.
+    ///
+    /// A CDROM cannot: the guest mounts the filesystem on it, but nothing boots from an
+    /// optical drive here.
+    pub fn can_be_root(self) -> bool {
+        !matches!(self, DiskBus::Cdrom)
+    }
+
+    /// The name to show in a list.
+    pub fn name(self) -> &'static str {
+        match self {
+            DiskBus::Virtio => "virtio",
+            DiskBus::Scsi => "scsi",
+            DiskBus::Pmem => "pmem",
+            DiskBus::Cdrom => "cdrom",
+        }
+    }
+}
+
+/// The on-disk format of an image.
+///
+/// Only what crosvm can actually open is listed. crosvm reads raw and qcow2; qcow2 is the
+/// one that supports backing files, so it is what an overlay is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskFormat {
+    /// A plain image. Sparse on most filesystems.
+    Raw,
+    /// qcow2, which supports backing files and compression.
+    Qcow2,
+}
+
+impl Default for DiskFormat {
+    fn default() -> Self {
+        DiskFormat::Raw
+    }
+}
+
+impl DiskFormat {
+    /// Guess from a file's extension, falling back to raw.
+    pub fn from_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("qcow2") | Some("qcow") => DiskFormat::Qcow2,
+            _ => DiskFormat::Raw,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DiskFormat::Raw => "raw",
+            DiskFormat::Qcow2 => "qcow2",
+        }
+    }
+
+    /// The extension a new image of this format should have.
+    pub fn extension(self) -> &'static str {
+        match self {
+            DiskFormat::Raw => "img",
+            DiskFormat::Qcow2 => "qcow2",
+        }
+    }
+}
+
 /// A disk attached to a machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskConfig {
@@ -169,9 +263,45 @@ pub struct DiskConfig {
     #[serde(default)]
     pub root: bool,
 
+    /// How to present it.
+    #[serde(default, skip_serializing_if = "is_default_bus")]
+    pub bus: DiskBus,
+
     /// Free-form label, purely for the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+fn is_default_bus(b: &DiskBus) -> bool {
+    *b == DiskBus::Virtio
+}
+
+/// How much the guest may cache of a shared directory.
+///
+/// Only meaningful for virtio-fs. `auto` gives close-to-open consistency, which is what a
+/// person expects from a shared folder; `always` is faster and can serve stale data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedDirCache {
+    Never,
+    Auto,
+    Always,
+}
+
+impl Default for SharedDirCache {
+    fn default() -> Self {
+        SharedDirCache::Auto
+    }
+}
+
+impl SharedDirCache {
+    pub fn name(self) -> &'static str {
+        match self {
+            SharedDirCache::Never => "never",
+            SharedDirCache::Auto => "auto",
+            SharedDirCache::Always => "always",
+        }
+    }
 }
 
 /// A directory shared with the guest.
@@ -184,6 +314,65 @@ pub struct SharedDirConfig {
     /// Read-only?
     #[serde(default)]
     pub readonly: bool,
+    /// How much the guest may cache.
+    #[serde(default, skip_serializing_if = "is_default_cache")]
+    pub cache: SharedDirCache,
+}
+
+fn is_default_cache(c: &SharedDirCache) -> bool {
+    *c == SharedDirCache::Auto
+}
+
+/// Where the guest's console goes.
+///
+/// crosvm can send a serial port several places, and which one is wanted depends on what
+/// is watching: a person at a terminal, a file for later, or a pipe for a program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "backend", content = "path")]
+pub enum SerialBackend {
+    /// Straight to this process's standard output. What a foreground run uses.
+    Stdout,
+    /// Append to a file. Useful when nobody is watching but the output matters.
+    File(PathBuf),
+    /// A pseudo-terminal, whose name is printed so something can attach to it.
+    Pty,
+    /// A Unix stream socket, for a client this tool does not know about.
+    Unix(PathBuf),
+    /// A Unix datagram socket.
+    UnixStream(PathBuf),
+}
+
+impl Default for SerialBackend {
+    fn default() -> Self {
+        // `hardware=serial,console` plus `type=stdout` is what the hub's console socket
+        // path builds on, so stdout stays the default.
+        SerialBackend::Stdout
+    }
+}
+
+/// The console.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialConfig {
+    /// Where the guest's serial port goes.
+    #[serde(default)]
+    pub backend: SerialBackend,
+
+    /// Also keep the kernel's log ring across reboots, via pstore.
+    ///
+    /// The guest needs `ramoops` set up for this to have anywhere to write, so it is a
+    /// record of a crash only when the guest kernel supports it. When it does not, the
+    /// option is inert rather than harmful.
+    #[serde(default)]
+    pub pstore: bool,
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            backend: SerialBackend::Stdout,
+            pstore: false,
+        }
+    }
 }
 
 /// Guest networking.
@@ -219,6 +408,11 @@ fn default_guest_iface() -> String {
     "eth0".to_string()
 }
 
+/// Leave the section out of a definition that takes all the defaults.
+fn is_default_serial(s: &SerialConfig) -> bool {
+    s.backend == SerialBackend::Stdout && !s.pstore
+}
+
 impl Default for NetConfig {
     fn default() -> Self {
         Self {
@@ -249,15 +443,18 @@ pub struct VmConfig {
     #[serde(default)]
     pub console: ConsoleConfig,
 
+    /// The console's own settings: where the serial port goes, and whether to keep
+    /// the kernel's log across reboots.
+    #[serde(default, skip_serializing_if = "is_default_serial")]
+    pub serial: SerialConfig,
+
     /// Disk images.
     ///
-    /// Note that virtio-blk is a virtio device like any other, and on Gunyah those
-    /// are the ones with problems: see the networking notes. An empty list is the
-    /// safe default.
+    /// virtio-blk works here; see `docs/virtio-on-gunyah.md` for what did not and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<DiskConfig>,
 
-    /// Directories shared with the guest over virtio-9p or virtio-fs.
+    /// Directories shared with the guest over virtio-fs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_dirs: Vec<SharedDirConfig>,
 
@@ -356,6 +553,35 @@ impl VmConfig {
         }
         if self.disks.iter().any(|d| d.root && d.readonly) {
             bail!("the root disk cannot be read-only");
+        }
+        for disk in &self.disks {
+            if disk.root && !disk.bus.can_be_root() {
+                bail!(
+                    "{} is on the {} bus, which cannot be the root device",
+                    disk.path.display(),
+                    disk.bus.name()
+                );
+            }
+        }
+
+        // A socket path has to be somewhere that exists, or crosvm fails to bind with a
+        // message that does not say which end is wrong.
+        match &self.serial.backend {
+            SerialBackend::Unix(p) | SerialBackend::UnixStream(p) => {
+                if let Some(dir) = p.parent() {
+                    if !dir.as_os_str().is_empty() && !dir.is_dir() {
+                        bail!("{} does not exist, so {} cannot be bound", dir.display(), p.display());
+                    }
+                }
+            }
+            SerialBackend::File(p) => {
+                if let Some(dir) = p.parent() {
+                    if !dir.as_os_str().is_empty() && !dir.is_dir() {
+                        bail!("{} does not exist, so {} cannot be written", dir.display(), p.display());
+                    }
+                }
+            }
+            _ => {}
         }
 
         for dir in &self.shared_dirs {

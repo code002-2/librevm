@@ -4,7 +4,7 @@
 //! hardware. The comments record why each flag is present, so the reasoning
 //! survives.
 
-use crate::config::{Hypervisor, Protection, VmConfig};
+use crate::config::{DiskBus, Hypervisor, Protection, SerialBackend, VmConfig};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -304,24 +304,71 @@ pub fn build_command(
     // Serial. crosvm's default hardware is an 8250 UART; `earlycon` makes it tell
     // the kernel where that UART is, which is what gets output out of the very
     // first instructions.
-    let serial = match console {
-        ConsoleSink::Stdout => {
-            "type=stdout,hardware=serial,console,earlycon".to_string()
-        }
-        ConsoleSink::UnixStream(path) => {
+    let serial = match &vm.serial.backend {
+        // The hub's console socket takes precedence when one is configured, because that
+        // is what a client attaches to; otherwise the configured backend is used.
+        SerialBackend::Stdout if matches!(console, ConsoleSink::UnixStream(_)) => match console {
+            ConsoleSink::UnixStream(path) => {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("creating {}", dir.display()))?;
+                }
+                // The socket must already be listening: crosvm's unix-stream serial is
+                // a client that connects to this path. Whoever bound it owns it, so it
+                // is emphatically not ours to unlink here -- doing so deletes the only
+                // name crosvm could have connected to, and the guest then has a console
+                // it can write to but that nothing can type into.
+                // `input-unix-stream` is what makes the socket carry input as well as
+                // output. Without it crosvm uses the socket for guest output only, so
+                // the guest can be watched but never typed into -- the operator sees a
+                // prompt and every keystroke silently goes nowhere.
+                format!(
+                    "type=unix-stream,path={},input-unix-stream,hardware=serial,console,earlycon",
+                    path.display()
+                )
+            }
+            ConsoleSink::Stdout => unreachable!("guarded by the match arm above"),
+        },
+
+        SerialBackend::Stdout => "type=stdout,hardware=serial,console,earlycon".to_string(),
+
+        // A file wants no `console` flag: crosvm treats the presence of a console sink as
+        // a request to wire up the input side too, and a file has no input side.
+        SerialBackend::File(path) => {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)
                     .with_context(|| format!("creating {}", dir.display()))?;
             }
-            // The socket must already be listening: crosvm's unix-stream serial is
-            // a client that connects to this path. Whoever bound it owns it, so it
-            // is emphatically not ours to unlink here -- doing so deletes the only
-            // name crosvm could have connected to, and the guest then has a console
-            // it can write to but that nothing can type into.
-            // `input-unix-stream` is what makes the socket carry input as well as
-            // output. Without it crosvm uses the socket for guest output only, so
-            // the guest can be watched but never typed into -- the operator sees a
-            // prompt and every keystroke silently goes nowhere.
+            format!(
+                "type=file,path={},hardware=serial,console,earlycon",
+                path.display()
+            )
+        }
+
+        // A pty has to exist before crosvm can be told to use it, so one is allocated here
+        // and its name logged. crosvm has no way to make one itself, and a pty nobody can
+        // find is not worth having.
+        SerialBackend::Pty => match allocate_pty() {
+            Some(path) => {
+                log::info!("console pty: {path}  (attach with: screen {path} 115200)");
+                format!("type=file,path={path},hardware=serial,console,earlycon")
+            }
+            None => {
+                log::warn!("could not allocate a pty; falling back to stdout");
+                "type=stdout,hardware=serial,console,earlycon".to_string()
+            }
+        },
+
+        SerialBackend::Unix(path) => format!(
+            "type=unix,path={},hardware=serial,console,earlycon",
+            path.display()
+        ),
+
+        SerialBackend::UnixStream(path) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
             format!(
                 "type=unix-stream,path={},input-unix-stream,hardware=serial,console,earlycon",
                 path.display()
@@ -331,40 +378,78 @@ pub fn build_command(
     args.push("--serial".to_string());
     args.push(serial);
 
+    // pstore: crosvm keeps the guest's kernel log in host memory across a reboot, so a
+    // crash that killed the console can still be read afterwards.
+    if vm.serial.pstore {
+        args.push("--pstore".to_string());
+        args.push("path=/tmp/librevm-pstore,size=1048576".to_string());
+    }
+
     if let Some(initrd) = &vm.boot.initramfs {
         args.push("--initrd".to_string());
         args.push(initrd.display().to_string());
     }
 
-    // Disks. crosvm wants a bare path for the root device and a keyed spec for the
-    // rest; read-only is expressed differently in each case.
+    // Disks. The bus decides which crosvm option carries it, and read-only is spelled
+    // differently on each. A CDROM is read-only by nature, so it is forced.
     for disk in &vm.disks {
-        if disk.root {
-            args.push("--rwroot".to_string());
-            args.push(format!(
-                "{},ro=false,lock=false",
-                disk.path.display()
-            ));
-            continue;
+        let ro = disk.readonly || disk.bus == DiskBus::Cdrom;
+        match disk.bus {
+            DiskBus::Virtio if disk.root => {
+                args.push("--rwroot".to_string());
+                args.push(format!("{},ro=false,lock=false", disk.path.display()));
+            }
+            DiskBus::Virtio => {
+                let mut spec = disk.path.display().to_string();
+                if ro {
+                    spec.push_str(",ro=true");
+                }
+                spec.push_str(",lock=false");
+                args.push("--block".to_string());
+                args.push(spec);
+            }
+            DiskBus::Scsi => {
+                let mut spec = disk.path.display().to_string();
+                if ro {
+                    spec.push_str(",ro=true");
+                }
+                spec.push_str(",lock=false");
+                args.push("--scsi-block".to_string());
+                args.push(spec);
+            }
+            DiskBus::Cdrom => {
+                args.push("--scsi-block".to_string());
+                args.push(format!(
+                    "{},ro=true,type=cdrom,lock=false",
+                    disk.path.display()
+                ));
+            }
+            DiskBus::Pmem => {
+                let mut spec = disk.path.display().to_string();
+                if ro {
+                    spec.push_str(",ro=true");
+                }
+                args.push("--pmem".to_string());
+                args.push(spec);
+            }
         }
-        let mut spec = disk.path.display().to_string();
-        if disk.readonly {
-            spec.push_str(",ro=true");
-        }
-        spec.push_str(",lock=false");
-        args.push("--block".to_string());
-        args.push(spec);
     }
 
-    // Shared directories, over 9p by default: virtio-fs needs a bigger guest
-    // kernel and a filesystem daemon, and 9p is enough for moving files about.
+    // Shared directories.
+    //
+    // virtio-fs, not 9p. crosvm's 9p device is declared but not implemented in the tree
+    // this targets, and its configuration type rejects unknown fields, so `type=p9` is
+    // either refused or silently upgraded. virtio-fs is the one that works, and it also
+    // carries the cache setting that makes a shared folder behave the way a person
+    // expects.
     for dir in &vm.shared_dirs {
-        let kind = if dir.readonly { "p9" } else { "p9" };
         args.push("--shared-dir".to_string());
         args.push(format!(
-            "{}:{}:type={kind}",
+            "{}:{}:type=fs:cache={}{}",
             dir.path.display(),
-            dir.tag
+            dir.tag,
+            dir.cache.name(),
+            if dir.readonly { ":writeback=never" } else { "" }
         ));
     }
 
@@ -380,6 +465,57 @@ pub fn build_command(
     args.push(vm.boot.kernel.display().to_string());
 
     Ok(args)
+}
+
+/// Allocate a pseudo-terminal and return the path of its slave side.
+///
+/// crosvm only writes to a path, so the pty has to exist first. The master side is kept
+/// open for the life of this process: with no master the slave has nobody on the other end
+/// and crosvm's writes fail, but closing the master also closes the slave, so it is
+/// deliberately leaked rather than dropped.
+///
+/// Nothing here is Android-specific; it is the oldest pty API there is.
+#[cfg(unix)]
+fn allocate_pty() -> Option<String> {
+    use std::ffi::CStr;
+
+    // SAFETY: each call is the plain libc one, and every failure is checked before the
+    // result is used. The file descriptor is intentionally not closed -- see above.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if master < 0 {
+            return None;
+        }
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            libc::close(master);
+            return None;
+        }
+        let name = libc::ptsname(master);
+        if name.is_null() {
+            libc::close(master);
+            return None;
+        }
+        let path = CStr::from_ptr(name).to_string_lossy().to_string();
+
+        // The slave has to carry the console's line settings. crosvm sets its own on the
+        // path it opens, but a raw pty with echo on would double every keystroke.
+        let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+        if slave >= 0 {
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(slave, &mut term) == 0 {
+                libc::cfmakeraw(&mut term);
+                libc::tcsetattr(slave, libc::TCSANOW, &term);
+            }
+            // Left open on purpose for the same reason as the master.
+        }
+
+        Some(path)
+    }
+}
+
+#[cfg(not(unix))]
+fn allocate_pty() -> Option<String> {
+    None
 }
 
 /// Make sure the command line carries a console and earlycon.

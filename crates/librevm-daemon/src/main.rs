@@ -429,6 +429,7 @@ impl Daemon {
                     path: deployed.path.clone(),
                     readonly: false,
                     root: as_root,
+                    bus: Default::default(),
                     label: Some(name.clone()),
                 });
                 vm.validate()?;
@@ -742,6 +743,7 @@ impl Daemon {
                 path: path.clone(),
                 readonly,
                 root,
+                bus: Default::default(),
                 label: if label.is_empty() { None } else { Some(label) },
             });
             vm.validate()?;
@@ -801,6 +803,9 @@ impl Daemon {
                 path: dir.clone(),
                 tag: tag.clone(),
                 readonly,
+                // The default cache is what a shared folder wants; a caller that cares can
+                // set it in the definition.
+                cache: Default::default(),
             });
             vm.validate()?;
             self.store.save(&vm)?;
@@ -854,6 +859,7 @@ impl Daemon {
                         path: path.clone(),
                         readonly: false,
                         root: false,
+                        bus: Default::default(),
                         label: None,
                     });
                     vm.validate()?;

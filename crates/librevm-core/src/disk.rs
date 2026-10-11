@@ -50,12 +50,21 @@ impl Format {
             "raw" => Ok(Format::Raw),
             "sparse" | "android-sparse" => Ok(Format::Sparse),
             "qcow2" | "qcow" => Ok(Format::Qcow2),
-            other => bail!("unknown disk format {other:?}; try raw or sparse"),
+            other => bail!("unknown disk format {other:?}; try raw, sparse or qcow2"),
         }
     }
 
     /// Can these tools write it?
+    ///
+    /// qcow2 is included because crosvm can create one. It is still not readable by the
+    /// tools here -- `read` refuses it, and says so, rather than misreporting a header as
+    /// a filesystem -- but creating it is useful, and it is what an overlay needs.
     pub fn writable(self) -> bool {
+        true
+    }
+
+    /// Can the tools here read its contents without help?
+    pub fn readable(self) -> bool {
         !matches!(self, Format::Qcow2)
     }
 }
@@ -167,29 +176,69 @@ fn detect_format(path: &Path) -> Result<Format> {
     Ok(Format::Raw)
 }
 
-/// The size the guest would see. A sparse image records it in its header rather
-/// than in the file's length.
+/// The size the guest would see, which is not the file's length for either format that
+/// carries a header.
+///
+/// A qcow2 image is usually *smaller* than the disk it describes, and an overlay can be
+/// tiny -- reporting the file length would say a 256 MiB disk is 320 KiB.
 fn logical_size(path: &Path, format: Format, file_len: u64) -> Result<u64> {
-    if format != Format::Sparse {
-        return Ok(file_len);
+    match format {
+        Format::Sparse => {
+            // Android sparse header: magic, major, minor, file_hdr_sz, chunk_hdr_sz,
+            // blk_sz, total_blks, total_chunks, image_checksum
+            let mut file = File::open(path)?;
+            let mut header = [0u8; 28];
+            file.read_exact(&mut header)
+                .context("the sparse header is truncated")?;
+            let blk_sz = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
+            let total_blks = u32::from_le_bytes(header[16..20].try_into().unwrap()) as u64;
+            Ok(blk_sz * total_blks)
+        }
+        Format::Qcow2 => Ok(qcow2_virtual_size(path).unwrap_or(file_len)),
+        Format::Raw => Ok(file_len),
     }
-    // Android sparse header: magic, major, minor, file_hdr_sz, chunk_hdr_sz,
-    // blk_sz, total_blks, total_chunks, image_checksum
-    let mut file = File::open(path)?;
-    let mut header = [0u8; 28];
-    file.read_exact(&mut header)
-        .context("the sparse header is truncated")?;
-    let blk_sz = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
-    let total_blks = u32::from_le_bytes(header[16..20].try_into().unwrap()) as u64;
-    Ok(blk_sz * total_blks)
+}
+
+/// Read a qcow2 header's virtual size: the size the guest sees.
+///
+/// The layout is fixed by the format: the magic, a version, then the backing file offset
+/// and size, then the cluster size, the *virtual* disk size, and so on. Only the virtual
+/// size is wanted, and it is a big-endian u64 at offset 24. A header that does not look
+/// right returns `None` so the caller can fall back rather than report a wrong number.
+fn qcow2_virtual_size(path: &Path) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 32];
+    file.read_exact(&mut header).ok()?;
+    if header[0..4] != *QCOW_MAGIC {
+        return None;
+    }
+    let version = u32::from_be_bytes(header[4..8].try_into().ok()?);
+    // Versions 2 and 3 both put the virtual size at the same offset.
+    if version != 2 && version != 3 {
+        return None;
+    }
+    let size = u64::from_be_bytes(header[24..32].try_into().ok()?);
+    // A zero here means a header this does not understand; falling back to the file
+    // length is better than reporting nothing.
+    if size == 0 {
+        None
+    } else {
+        Some(size)
+    }
 }
 
 /// Create a new image.
 ///
 /// A raw image is made sparse, so a 4 GiB disk with nothing on it occupies almost
 /// nothing. A sparse image is written with a single "fill with zeros" chunk, which is
-/// the cheapest way to describe an empty one.
-pub fn create(path: &Path, size: u64, format: Format) -> Result<Disk> {
+/// the cheapest way to describe an empty one. A qcow2 image is handed to crosvm, which
+/// has its own writer; crosvm is the one that has to read it, so it is the right thing to
+/// have made it.
+///
+/// `backing` makes the new image an overlay: it starts empty and any block not written is
+/// read from the backing file. That is how a snapshot layer is built, and it is the reason
+/// qcow2 is worth having at all here.
+pub fn create_with_backing(path: &Path, size: u64, format: Format, backing: Option<&Path>) -> Result<Disk> {
     if path.exists() {
         bail!("{} already exists", path.display());
     }
@@ -207,6 +256,9 @@ pub fn create(path: &Path, size: u64, format: Format) -> Result<Disk> {
 
     match format {
         Format::Raw => {
+            if backing.is_some() {
+                bail!("a raw image cannot have a backing file; only qcow2 can");
+            }
             // set_len makes a sparse file on every filesystem worth using here
             let file = OpenOptions::new()
                 .create_new(true)
@@ -217,11 +269,58 @@ pub fn create(path: &Path, size: u64, format: Format) -> Result<Disk> {
                 .with_context(|| format!("sizing {}", path.display()))?;
             file.sync_all().ok();
         }
-        Format::Sparse => write_empty_sparse(path, size)?,
-        Format::Qcow2 => unreachable!("rejected above"),
+        Format::Sparse => {
+            if backing.is_some() {
+                bail!("a sparse image cannot have a backing file; only qcow2 can");
+            }
+            write_empty_sparse(path, size)?;
+        }
+        Format::Qcow2 => create_qcow2(path, size, backing)?,
     }
 
     open(path)
+}
+
+/// Create a qcow2 image with crosvm's own writer.
+///
+/// `qemu-img` would be the usual tool for this and is not installed, but crosvm can make a
+/// qcow2 and can make one over a backing file, which is the whole of what is needed. Its
+/// size argument is in bytes and has no suffix parsing, so the number is formatted here.
+fn create_qcow2(path: &Path, size: u64, backing: Option<&Path>) -> Result<()> {
+    let crosvm = crate::backend::find_crosvm(None)
+        .context("creating a qcow2 image needs crosvm, which was not found")?;
+
+    let mut cmd = std::process::Command::new(&crosvm);
+    cmd.arg("create_qcow2").arg(path);
+    match backing {
+        // With a backing file the size is inherited, so crosvm takes none: passing one is
+        // refused rather than ignored.
+        Some(base) => {
+            if !base.is_file() {
+                bail!("backing file {} does not exist", base.display());
+            }
+            cmd.arg("--backing-file").arg(base);
+        }
+        None => {
+            cmd.arg(size.to_string());
+        }
+    }
+
+    let out = cmd.output().context("running crosvm create_qcow2")?;
+    if !out.status.success() {
+        // Do not leave a half-written image behind for something to try to mount.
+        std::fs::remove_file(path).ok();
+        bail!(
+            "crosvm create_qcow2 failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The old two-argument form, kept because most callers want it.
+pub fn create(path: &Path, size: u64, format: Format) -> Result<Disk> {
+    create_with_backing(path, size, format, None)
 }
 
 /// An Android sparse image holding one chunk that expands to all zeros.
@@ -272,8 +371,12 @@ fn write_empty_sparse(path: &Path, size: u64) -> Result<()> {
 /// shrink is refused unless `force` is given.
 pub fn resize(path: &Path, new_size: u64, force: bool) -> Result<Disk> {
     let before = open(path)?;
-    if !before.format.writable() {
-        bail!("resizing {} images needs qemu, which is not installed", before.format.name());
+    if !before.format.readable() {
+        bail!(
+            "resizing a {} image needs qemu-img, which is not installed; crosvm can create \
+             one but not change its size",
+            before.format.name()
+        );
     }
     let new_size = normalise_size(new_size);
 
@@ -423,8 +526,11 @@ pub fn clone_to(src: &Path, dst: &Path) -> Result<Disk> {
         bail!("{} already exists", dst.display());
     }
     let source = open(src)?;
-    if !source.format.writable() {
-        bail!("copying {} images needs qemu, which is not installed", source.format.name());
+    if !source.format.readable() {
+        bail!(
+            "copying a {} image needs qemu-img, which is not installed",
+            source.format.name()
+        );
     }
 
     if let Some(dir) = dst.parent() {
@@ -645,7 +751,8 @@ mod tests {
         assert_eq!(Format::parse("SPARSE").unwrap(), Format::Sparse);
         assert_eq!(Format::parse("qcow2").unwrap(), Format::Qcow2);
         assert!(Format::parse("vmdk").is_err());
-        assert!(!Format::Qcow2.writable());
+        assert!(Format::Qcow2.writable(), "crosvm can create one");
+        assert!(!Format::Qcow2.readable(), "nothing here can read one");
     }
 
     #[test]
@@ -792,8 +899,58 @@ mod tests {
         std::fs::write(&img, &header).unwrap();
         let disk = open(&img).unwrap();
         assert_eq!(disk.format, Format::Qcow2);
-        assert!(!disk.format.writable());
+        // Recognised and creatable, but not readable here: there is no qcow2 parser and no
+        // qemu-img, so a resize has to refuse rather than corrupt it.
+        assert!(disk.format.writable());
+        assert!(!disk.format.readable());
         assert!(resize(&img, 64 * 1024 * 1024, true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_qcow2_header_is_read_for_its_virtual_size() {
+        // A real qcow2 header, built the way the format defines it: magic, version, the
+        // backing file offset and size, the cluster bits, then the virtual size as a
+        // big-endian u64 at offset 24. The file itself is far smaller than the disk it
+        // describes, which is the whole point -- reporting the file length would say a
+        // 256 MiB disk is a few hundred bytes.
+        let dir = tmpdir("qcow2size");
+        let img = dir.join("a.qcow2");
+        let mut header = Vec::new();
+        header.extend_from_slice(QCOW_MAGIC);
+        header.extend_from_slice(&3u32.to_be_bytes()); // version 3
+        header.extend_from_slice(&0u64.to_be_bytes()); // backing file offset
+        header.extend_from_slice(&0u32.to_be_bytes()); // backing file size
+        header.extend_from_slice(&16u32.to_be_bytes()); // cluster bits
+        header.extend_from_slice(&(256u64 * 1024 * 1024).to_be_bytes()); // virtual size
+        header.extend_from_slice(&[0u8; 40]);
+        std::fs::write(&img, &header).unwrap();
+
+        let disk = open(&img).unwrap();
+        assert_eq!(disk.format, Format::Qcow2);
+        assert_eq!(
+            disk.capacity,
+            256 * 1024 * 1024,
+            "the virtual size should be reported, not the file's {} bytes",
+            std::fs::metadata(&img).unwrap().len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_qcow2_header_this_does_not_understand_falls_back() {
+        // A truncated or nonsense header must not make the size come out as zero.
+        let dir = tmpdir("qcow2bad");
+        let img = dir.join("b.qcow2");
+        let mut header = Vec::new();
+        header.extend_from_slice(QCOW_MAGIC);
+        header.extend_from_slice(&99u32.to_be_bytes()); // a version that does not exist
+        header.extend_from_slice(&[0u8; 52]);
+        std::fs::write(&img, &header).unwrap();
+
+        let disk = open(&img).unwrap();
+        assert_eq!(disk.format, Format::Qcow2);
+        assert_eq!(disk.capacity, std::fs::metadata(&img).unwrap().len());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
