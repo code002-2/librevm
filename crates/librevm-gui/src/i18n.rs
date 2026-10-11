@@ -192,6 +192,25 @@ pub enum Key {
     SwiotlbTooBigBody,
     CouldNotSave,
     Settings,
+
+    // -- the images page --------------------------------------------------
+    Images,
+    AvailableImages,
+    AvailableImagesHint,
+    DeployedImages,
+    DeployedImagesHint,
+    Deploy,
+    Redeploy,
+    DeployImage,
+    ImageName,
+    AttachTo,
+    Source,
+    DeployNote,
+    NoImagesYet,
+    NoDaemon,
+    MirrorDefault,
+    DeploySsh,
+    SshDeployHint,
 }
 
 impl Key {
@@ -201,7 +220,6 @@ impl Key {
             Key::NoMachinesTitle => "No machines yet",
             Key::NoMachinesBody => "Use the + button to create one.",
             Key::CreateVm => "Create a virtual machine",
-            Key::Refresh => "Refresh",
             Key::Machines => "Machines",
             Key::ShowConsole => "Show the guest console",
             Key::Details => "Details",
@@ -311,6 +329,33 @@ impl Key {
             Key::SwiotlbTooBigBody => "crosvm computes memory - swiotlb and panics.",
             Key::CouldNotSave => "Could not save",
             Key::Settings => "Settings",
+
+            Key::Images => "Images",
+            Key::AvailableImages => "Available",
+            Key::AvailableImagesHint => {
+                "Fetched from mirrors in mainland China. Deploying downloads one and turns \
+                 it into a bootable disk."
+            }
+            Key::DeployedImages => "Deployed",
+            Key::DeployedImagesHint => "Disks made from an image.",
+            Key::Deploy => "Deploy",
+            Key::Redeploy => "Deploy again",
+            Key::DeployImage => "Deploy an image",
+            Key::ImageName => "Name",
+            Key::AttachTo => "Attach to",
+            Key::Source => "Source",
+            Key::DeployNote => {
+                "The download happens on the daemon, so the window will not respond until \
+                 it finishes. The SSH key is installed as the image is built."
+            }
+            Key::NoImagesYet => "Nothing deployed yet.",
+            Key::NoDaemon => "no daemon on the bus",
+            Key::MirrorDefault => "the catalogue's own mirrors",
+            Key::DeploySsh => "Set up SSH",
+            Key::SshDeployHint => {
+                "Installs the key and a first-boot script that starts sshd. Needs no rebuild."
+            }
+            Key::Refresh => "Refresh",
         }
     }
 
@@ -420,6 +465,28 @@ impl Key {
             Key::SwiotlbTooBigBody => "crosvm 用「内存 − swiotlb」算，减出负数会崩。",
             Key::CouldNotSave => "保存失败",
             Key::Settings => "设置",
+
+            Key::Images => "镜像",
+            Key::AvailableImages => "可获取",
+            Key::AvailableImagesHint => "从国内镜像站拉取。部署会下载并做成可启动的磁盘。",
+            Key::DeployedImages => "已部署",
+            Key::DeployedImagesHint => "由镜像做成的磁盘。",
+            Key::Deploy => "部署",
+            Key::Redeploy => "重新部署",
+            Key::DeployImage => "部署镜像",
+            Key::ImageName => "名称",
+            Key::AttachTo => "挂到",
+            Key::Source => "来源",
+            Key::DeployNote => {
+                "下载在 daemon 上进行，期间窗口不会响应。\n\
+                 构建镜像时会把 SSH 公钥一并装进去。"
+            }
+            Key::NoImagesYet => "还没有部署过。",
+            Key::NoDaemon => "总线上没有 daemon",
+            Key::MirrorDefault => "目录自带的镜像站",
+            Key::DeploySsh => "部署 SSH",
+            Key::SshDeployHint => "写入公钥和首启脚本（会启动 sshd），无需重建镜像。",
+            Key::Refresh => "刷新",
         }
     }
 }
@@ -429,6 +496,67 @@ pub fn tr(key: Key) -> &'static str {
     match current() {
         Lang::En => key.en(),
         Lang::Zh => key.zh(),
+    }
+}
+
+/// "4 MiB down, 1024 MiB disk".
+pub fn tr_image_row(download_mib: u64, disk_mib: u64) -> String {
+    match current() {
+        Lang::En => format!("{download_mib} MiB download, {disk_mib} MiB disk"),
+        Lang::Zh => format!("下载 {download_mib} MiB，磁盘 {disk_mib} MiB"),
+    }
+}
+
+/// "1024 MiB, 42 MiB on disk".
+pub fn tr_image_usage(bytes: u64, on_disk: u64) -> String {
+    let mib = |b: u64| b as f64 / 1048576.0;
+    match current() {
+        Lang::En => format!("{:.0} MiB, {:.0} MiB on disk", mib(bytes), mib(on_disk)),
+        Lang::Zh => format!("{:.0} MiB，占盘 {:.0} MiB", mib(bytes), mib(on_disk)),
+    }
+}
+
+pub fn tr_images_status(available: usize, deployed: usize, mirror: &str) -> String {
+    match current() {
+        Lang::En => format!("{available} available, {deployed} deployed. Mirror: {mirror}"),
+        Lang::Zh => format!("可获取 {available} 个，已部署 {deployed} 个。镜像站：{mirror}"),
+    }
+}
+
+pub fn tr_deploying(name: &str) -> String {
+    match current() {
+        Lang::En => format!("downloading and building {name}..."),
+        Lang::Zh => format!("正在下载并构建 {name}…"),
+    }
+}
+
+pub fn tr_deployed(path: &str, attached: bool, machine: &str) -> String {
+    match current() {
+        Lang::En if attached => format!("built {path}, attached to {machine}"),
+        Lang::Zh if attached => format!("已构建 {path}，已挂到 {machine}"),
+        Lang::En => format!("built {path}"),
+        Lang::Zh => format!("已构建 {path}"),
+    }
+}
+
+pub fn tr_deploy_failed(why: &str) -> String {
+    match current() {
+        Lang::En => format!("failed: {why}"),
+        Lang::Zh => format!("失败：{why}"),
+    }
+}
+
+pub fn tr_deploying_ssh(name: &str) -> String {
+    match current() {
+        Lang::En => format!("putting the key into {name}..."),
+        Lang::Zh => format!("正在写入公钥到 {name}…"),
+    }
+}
+
+pub fn tr_ssh_deployed(name: &str, notes: &str) -> String {
+    match current() {
+        Lang::En => format!("{name}: {notes}"),
+        Lang::Zh => format!("{name}：{notes}"),
     }
 }
 

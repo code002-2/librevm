@@ -14,6 +14,7 @@ mod daemon;
 mod disks;
 mod editor;
 mod i18n;
+mod images;
 mod vm_view;
 mod window;
 

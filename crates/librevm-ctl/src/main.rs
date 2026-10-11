@@ -14,7 +14,7 @@ use librevm_core::hub;
 use librevm_core::store::Store;
 use librevm_core::vm::{self, State};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -146,6 +146,25 @@ enum Command {
     Net {
         #[command(subcommand)]
         action: NetCommand,
+    },
+
+    /// Fetch a system image and deploy it as a disk.
+    Image {
+        #[command(subcommand)]
+        action: ImageCommand,
+    },
+
+    /// Reach a machine over SSH.
+    Ssh {
+        #[command(subcommand)]
+        action: Option<SshCommand>,
+
+        /// The machine, when connecting.
+        name: Option<String>,
+
+        /// A command to run instead of opening a shell.
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
     },
 
     /// Share a directory with a VM.
@@ -283,8 +302,78 @@ enum ShareCommand {    /// Share a directory with a VM.
 }
 
 #[derive(Subcommand, Debug)]
-enum NetCommand {
-    /// Turn networking on for a VM and set the host side up now.
+enum ImageCommand {
+    /// List the images that can be fetched.
+    List,
+
+    /// Fetch one and deploy it as a disk, then attach it to a machine.
+    Fetch {
+        /// The id from `image list`.
+        id: String,
+
+        /// What to call the image. Defaults to the id.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// How big the disk should be: 2G, 4096M. Defaults to the catalogue's suggestion.
+        #[arg(short, long)]
+        size: Option<String>,
+
+        /// Attach it to this machine when it is ready.
+        #[arg(long)]
+        attach_to: Option<String>,
+
+        /// Mount it as the root device.
+        ///
+        /// Named `as_root` rather than `root`: clap's derive indexes by *field* name, and
+        /// the short name collides with the `--root` option every command inherits for the
+        /// store directory. Renaming only the long option is not enough.
+        #[arg(long = "root")]
+        as_root: bool,
+    },
+
+    /// Deploy an image from a URL or a local tarball, without using the catalogue.
+    From {
+        /// An http(s) URL, or a path to a tarball already on this machine.
+        source: String,
+
+        /// What to call it.
+        #[arg(long)]
+        name: String,
+
+        #[arg(short, long)]
+        size: Option<String>,
+
+        /// tar's compression flag: -z, -J, or --zstd.
+        #[arg(long, default_value = "-z")]
+        compression: String,
+    },
+
+    /// What is already downloaded.
+    Cached,
+}
+
+#[derive(Subcommand, Debug)]
+enum SshCommand {
+    /// Show the public key guests are given, making the keypair if needed.
+    Key {
+        /// Print only the key, for pasting elsewhere.
+        #[arg(long)]
+        quiet: bool,
+    },
+
+    /// Write an ssh config so guests can be reached by name outside this tool.
+    Config,
+
+    /// Check whether a machine is reachable.
+    Check {
+        /// The machine.
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum NetCommand {    /// Turn networking on for a VM and set the host side up now.
     Enable {
         /// The VM.
         name: String,
@@ -418,6 +507,12 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
         Command::Delete { name, force } => cmd_delete(store, name, *force),
         Command::Disk { action } => cmd_disk(store, action),
         Command::Net { action } => cmd_net(store, action),
+        Command::Image { action } => cmd_image(store, action),
+        Command::Ssh {
+            action,
+            name,
+            command,
+        } => cmd_ssh(store, action.as_ref(), name.as_deref(), command),
         Command::Share { action } => cmd_share(store, action),
         Command::Hub { name } => hub::run(store, name),
     }
@@ -497,6 +592,478 @@ fn indent(text: &str) -> String {
     text.lines()
         .map(|l| format!("    {l}\n"))
         .collect::<String>()
+}
+
+// -- images -----------------------------------------------------------------
+
+fn cmd_image(store: &Store, action: &ImageCommand) -> Result<()> {
+    match action {
+        ImageCommand::List => {
+            println!(
+                "{:<16} {:>8} {:>9}  {}",
+                "ID", "DOWNLOAD", "DISK", "DESCRIPTION"
+            );
+            for e in librevm_core::image::CATALOGUE {
+                println!(
+                    "{:<16} {:>6} M {:>7} M  {}",
+                    e.id, e.download_mib, e.disk_mib, e.description
+                );
+            }
+            println!();
+            println!("Deploy one with: librevm image fetch <id> --name <name>");
+            Ok(())
+        }
+
+        ImageCommand::Fetch {
+            id,
+            name,
+            size,
+            attach_to,
+            as_root,
+        } => {
+            let entry = librevm_core::image::find(id)
+                .with_context(|| format!("no image called {id}; try `librevm image list`"))?;
+            let name = name.clone().unwrap_or_else(|| id.clone());
+            check_image_name(&name)?;
+            let size_mib = match size {
+                Some(s) => Some(librevm_core::disk::parse_size(s)? / (1024 * 1024)),
+                None => None,
+            };
+
+            deploy_one(store, entry, &name, size_mib, attach_to.as_deref(), *as_root)
+        }
+
+        ImageCommand::From {
+            source,
+            name,
+            size,
+            compression,
+        } => {
+            check_image_name(name)?;
+            let size_mib = match size {
+                Some(s) => Some(librevm_core::disk::parse_size(s)? / (1024 * 1024)),
+                None => None,
+            };
+
+            // A local tarball is deployed directly; a URL is downloaded into the cache
+            // first, so a repeat costs nothing.
+            let archive = if source.starts_with("http://") || source.starts_with("https://") {
+                let entry = librevm_core::image::ImageEntry::from_url(
+                    source,
+                    match compression.as_str() {
+                        "-J" => librevm_core::image::Compression::Xz,
+                        "--zstd" => librevm_core::image::Compression::Zstd,
+                        _ => librevm_core::image::Compression::Gzip,
+                    },
+                );
+                println!("downloading {source}");
+                librevm_core::image::fetch(&store.images_dir(), &entry, |got, total| {
+                    librevm_core::image::progress_line(got, total)
+                })?
+            } else {
+                let p = PathBuf::from(source);
+                if !p.is_file() {
+                    bail!("{} is not a file", p.display());
+                }
+                p
+            };
+            println!();
+
+            let compression = match compression.as_str() {
+                "-J" => librevm_core::image::Compression::Xz,
+                "--zstd" => librevm_core::image::Compression::Zstd,
+                _ => librevm_core::image::Compression::Gzip,
+            };
+            deploy_archive(store, &archive, name, size_mib, compression, None).map(|_| ())
+        }
+
+        ImageCommand::Cached => {
+            let dir = librevm_core::image::cache_dir(&store.images_dir());
+            if !dir.is_dir() {
+                println!("nothing downloaded yet ({})", dir.display());
+                return Ok(());
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            let mut total = 0u64;
+            for e in &entries {
+                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+                total += len;
+                println!("  {:>8.1} MiB  {}", len as f64 / 1048576.0, e.file_name().to_string_lossy());
+            }
+            println!(
+                "  {} files, {:.1} MiB in {}",
+                entries.len(),
+                total as f64 / 1048576.0,
+                dir.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Names become filenames, so keep them to something safe.
+fn check_image_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        bail!("an image name must be 1 to 64 characters");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!("an image name may use letters, digits, dash, underscore and dot");
+    }
+    Ok(())
+}
+
+fn deploy_one(
+    store: &Store,
+    entry: &librevm_core::image::ImageEntry,
+    name: &str,
+    size_mib: Option<u64>,
+    attach_to: Option<&str>,
+    root: bool,
+) -> Result<()> {
+    println!("{}: {}", entry.id, entry.description);
+    println!("  {}", entry.url);
+    println!();
+
+    // The key has to exist before the image is built, because it is injected into it.
+    let public = librevm_core::ssh::ensure_keypair(store.root())?;
+
+    println!(
+        "downloading ({}{} MiB)",
+        if entry.download_mib > 0 {
+            format!("about {}", entry.download_mib)
+        } else {
+            "size unknown, ".to_string()
+        },
+        if entry.download_mib > 0 { "" } else { "" }
+    );
+    let archive = librevm_core::image::fetch(&store.images_dir(), entry, |got, total| {
+        librevm_core::image::progress_line(got, total)
+    })?;
+    println!();
+    println!("  cached at {}", archive.display());
+
+    deploy_archive(
+        store,
+        &archive,
+        name,
+        size_mib.or(Some(entry.disk_mib)),
+        entry.compression,
+        Some(&public),
+    )
+    .and_then(|path| {
+        if let Some(machine) = attach_to {
+            attach_image(store, &path, machine, root)
+        } else {
+            Ok(())
+        }
+    })
+    .map(|_| ())
+}
+
+fn deploy_archive(
+    store: &Store,
+    archive: &Path,
+    name: &str,
+    size_mib: Option<u64>,
+    compression: librevm_core::image::Compression,
+    public_key: Option<&str>,
+) -> Result<PathBuf> {
+    let images = store.images_dir();
+    std::fs::create_dir_all(&images)?;
+    let target = images.join(format!("{name}.img"));
+    if target.exists() {
+        bail!("{} exists already", target.display());
+    }
+
+    // A rough size from the archive when the caller did not say. Unpacking a tree bigger
+    // than the filesystem fails part way through, after most of the work.
+    let mut size = size_mib.unwrap_or(2048);
+    if size_mib.is_none() {
+        if let Ok(Some(bytes)) = librevm_core::image::archive_uncompressed_size(archive) {
+            let mib = bytes / 1048576;
+            size = (mib * 2 + 256).max(512);
+            println!("  the tree is about {mib} MiB; making the disk {size} MiB");
+        }
+    }
+
+    println!("  making a {size} MiB ext4 image at {}", target.display());
+    librevm_core::image::make_image(&target, size)?;
+
+    println!("  unpacking");
+    let key = public_key
+        .map(|k| k.to_string())
+        .or_else(|| librevm_core::ssh::ensure_keypair(store.root()).ok());
+    let dns = librevm_core::image::host_nameservers();
+    let injections = librevm_core::image::Injections {
+        authorized_key: key,
+        ssh_user: Some(librevm_core::ssh::USER.to_string()),
+        dns,
+        root_password: None,
+    };
+
+    match unpack_into(&target, compression, archive, &injections) {
+        Ok(notes) => {
+            println!("  done");
+            for n in &notes {
+                println!("    {n}");
+            }
+        }
+        Err(e) => {
+            std::fs::remove_file(&target).ok();
+            return Err(e);
+        }
+    }
+
+    let meta = std::fs::metadata(&target)?;
+    let on_disk = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            librevm_core::disk::human(meta.blocks() * 512)
+        }
+        #[cfg(not(unix))]
+        {
+            librevm_core::disk::human(meta.len())
+        }
+    };
+    println!();
+    println!("{}", target.display());
+    println!("  {} MiB, {} on disk", size, on_disk);
+    println!();
+    println!("Attach it with:");
+    println!(
+        "  librevm disk attach <machine> {} --label {name}",
+        target.display()
+    );
+    Ok(target)
+}
+
+/// Loop-mount the image, unpack into it, inject, and put it back.
+fn unpack_into(
+    image: &Path,
+    compression: librevm_core::image::Compression,
+    archive: &Path,
+    injections: &librevm_core::image::Injections,
+) -> Result<Vec<String>> {
+    let flag = match compression {
+        librevm_core::image::Compression::Gzip => "-z",
+        librevm_core::image::Compression::Xz => "-J",
+        librevm_core::image::Compression::Zstd => "--zstd",
+    };
+
+    let loop_device = {
+        let out = std::process::Command::new("losetup")
+            .args(["--find", "--show", &image.display().to_string()])
+            .output()
+            .context("running losetup; is util-linux installed?")?;
+        if !out.status.success() {
+            bail!("losetup: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let mount_point = PathBuf::from(format!("/tmp/librevm-deploy-{}", std::process::id()));
+    std::fs::create_dir_all(&mount_point)?;
+
+    // Everything from here has to be undone, including on the error paths.
+    let result = (|| -> Result<Vec<String>> {
+        let out = std::process::Command::new("mount")
+            .args([&loop_device, &mount_point.display().to_string()])
+            .output()
+            .context("running mount")?;
+        if !out.status.success() {
+            bail!("mount: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+
+        let out = std::process::Command::new("tar")
+            .args([
+                "-x",
+                flag,
+                "-f",
+                &archive.display().to_string(),
+                "-C",
+                &mount_point.display().to_string(),
+                "--numeric-owner",
+                "--warning=no-unknown-keyword",
+            ])
+            .output()
+            .context("running tar")?;
+        if !out.status.success() {
+            bail!("tar: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+
+        librevm_core::image::inject(&mount_point, injections)
+    })();
+
+    // Unmount and detach whatever happened, and in that order.
+    let _ = std::process::Command::new("umount").arg(&mount_point).output();
+    let _ = std::process::Command::new("losetup")
+        .args(["--detach", &loop_device])
+        .output();
+    let _ = std::fs::remove_dir(&mount_point);
+
+    result
+}
+
+
+fn attach_image(store: &Store, image: &Path, machine: &str, root: bool) -> Result<()> {
+    let mut vm = store.load(machine)?;
+    let label = image
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "root".to_string());
+    vm.disks.push(librevm_core::config::DiskConfig {
+        path: image.to_path_buf(),
+        readonly: false,
+        root,
+        label: Some(label),
+    });
+    vm.validate()?;
+    store.save(&vm)?;
+    println!("attached to {machine}");
+    Ok(())
+}
+
+// -- ssh --------------------------------------------------------------------
+
+fn cmd_ssh(
+    store: &Store,
+    action: Option<&SshCommand>,
+    name: Option<&str>,
+    command: &[String],
+) -> Result<()> {
+    let (have_ssh, have_keygen) = librevm_core::ssh::tools_available();
+    if !have_ssh || !have_keygen {
+        bail!("openssh-client is needed: ssh and ssh-keygen must be on PATH");
+    }
+
+    match action {
+        Some(SshCommand::Key { quiet }) => {
+            let key = librevm_core::ssh::ensure_keypair(store.root())?;
+            if *quiet {
+                println!("{key}");
+            } else {
+                println!("{}", librevm_core::ssh::public_key(store.root()).display());
+                println!("{key}");
+                println!();
+                println!("This is injected into images deployed with `image fetch`.");
+            }
+            Ok(())
+        }
+
+        Some(SshCommand::Config) => {
+            librevm_core::ssh::ensure_keypair(store.root())?;
+            let machines = ssh_targets(store);
+            if machines.is_empty() {
+                println!("no machines yet");
+            }
+            let path = librevm_core::ssh::write_client_config(store.root(), &machines)?;
+            println!("{}", path.display());
+            println!();
+            for (name, address) in &machines {
+                println!("  librevm-{name}  ->  {address}");
+            }
+            println!();
+            println!("Add this to ~/.ssh/config to use those names:");
+            println!("  Include {}", path.display());
+            Ok(())
+        }
+
+        Some(SshCommand::Check { name }) => {
+            let address = guest_address(store, name)?;
+            println!("{name} at {address}");
+            let out = librevm_core::ssh::run(store.root(), &address, "uname -a");
+            match out {
+                Ok(text) => {
+                    println!("reachable");
+                    println!("  {}", text.trim());
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("not reachable: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        None => {
+            let name = name.context("which machine? try `librevm list`")?;
+            let address = guest_address(store, name)?;
+            let joined = if command.is_empty() {
+                None
+            } else {
+                Some(command.join(" "))
+            };
+            librevm_core::ssh::connect(store.root(), &address, joined.as_deref())
+        }
+    }
+}
+
+/// Every machine that has a network, and the address it will be on.
+fn ssh_targets(store: &Store) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in store.list().unwrap_or_default() {
+        if let Ok(vm) = store.load(&name) {
+            if vm.network.enabled {
+                if let Ok(addr) = guest_address(store, &name) {
+                    out.push((name, addr));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The address a machine's guest will take, from its network index.
+///
+/// This is the same arithmetic `net::setup` does, kept here so a command can name a guest
+/// without the host side having to be up.
+pub fn guest_address(store: &Store, name: &str) -> Result<String> {
+    let vm = store.load(name)?;
+    if !vm.network.enabled {
+        bail!("{name} has no network; `librevm net enable {name}`");
+    }
+    let octets = host_subnet()?;
+    let last = 201u8.saturating_add(vm.network.index);
+    Ok(format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], last))
+}
+
+/// The host's own address, so the guest's can be derived from it.
+fn host_subnet() -> Result<[u8; 3]> {
+    let route = std::fs::read_to_string("/proc/net/route").context("reading the routing table")?;
+    let mut interface = None;
+    for line in route.lines().skip(1) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 2 && f[1] == "00000000" {
+            interface = Some(f[0].to_string());
+            break;
+        }
+    }
+    let interface = interface.context("no default route; is this host online?")?;
+    let out = std::process::Command::new("ip")
+        .args(["-4", "-brief", "addr", "show", &interface])
+        .output()
+        .context("asking ip for the address")?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let cidr = text
+        .split_whitespace()
+        .find(|w| w.contains('/') && w.contains('.'))
+        .context("the uplink has no IPv4 address")?;
+    let addr: std::net::Ipv4Addr = cidr
+        .split('/')
+        .next()
+        .context("malformed address")?
+        .parse()
+        .context("malformed address")?;
+    let o = addr.octets();
+    Ok([o[0], o[1], o[2]])
 }
 
 // -- disks ------------------------------------------------------------------

@@ -352,10 +352,17 @@ fn fill(window: &adw::ApplicationWindow) {
     // ---- detail ---------------------------------------------------------
     let view = Rc::new(VmView::new(store.clone()));
     let console = Rc::new(ConsoleView::new(store.clone()));
+    // The images page needs the daemon: deploying is a download and a filesystem, which is
+    // not something the window should be doing with its own privileges.
+    let images = Rc::new(crate::images::ImagesPage::new(
+        store.clone(),
+        crate::daemon::Bridge::new(),
+    ));
 
     let detail_stack = gtk4::Stack::builder().vexpand(true).build();
     detail_stack.add_named(&view.widget(), Some("detail"));
     detail_stack.add_named(&console.widget(), Some("console"));
+    detail_stack.add_named(&images.root, Some("images"));
     detail_stack.set_visible_child_name("detail");
 
     let console_toggle = gtk4::ToggleButton::builder()
@@ -364,8 +371,15 @@ fn fill(window: &adw::ApplicationWindow) {
         .css_classes(["flat"])
         .build();
 
+    let images_toggle = gtk4::ToggleButton::builder()
+        .icon_name("drive-harddisk-symbolic")
+        .tooltip_text(i18n::tr(i18n::Key::Images))
+        .css_classes(["flat"])
+        .build();
+
     let detail_header = adw::HeaderBar::builder().build();
     detail_header.pack_end(&console_toggle);
+    detail_header.pack_start(&images_toggle);
 
     let detail_toolbar = adw::ToolbarView::new();
     detail_toolbar.add_top_bar(&detail_header);
@@ -455,6 +469,35 @@ fn fill(window: &adw::ApplicationWindow) {
         let detail_stack = detail_stack.clone();
         console_toggle.connect_toggled(move |b| {
             detail_stack.set_visible_child_name(if b.is_active() { "console" } else { "detail" });
+        });
+    }
+
+    // The images page. Turning it on refreshes the lists, because what is deployed can
+    // change from outside the window.
+    {
+        let detail_stack = detail_stack.clone();
+        let console_toggle = console_toggle.clone();
+        let images = images.clone();
+        images_toggle.connect_toggled(move |b| {
+            if b.is_active() {
+                // Only one of the two toggles is on at a time.
+                console_toggle.set_active(false);
+                detail_stack.set_visible_child_name("images");
+                images.reload();
+            } else {
+                detail_stack.set_visible_child_name("detail");
+            }
+        });
+    }
+    {
+        // Leaving the images page has to clear its toggle, or the header shows two views
+        // selected at once.
+        let images_toggle = images_toggle.clone();
+        let console_toggle = console_toggle.clone();
+        console_toggle.connect_toggled(move |b| {
+            if b.is_active() {
+                images_toggle.set_active(false);
+            }
         });
     }
 

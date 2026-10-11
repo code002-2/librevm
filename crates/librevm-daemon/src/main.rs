@@ -349,6 +349,196 @@ impl Daemon {
         }))
     }
 
+    /// The images that can be fetched, with whichever mirror is in force.
+    async fn image_catalogue(&self) -> String {
+        let chosen = librevm_core::image::chosen_mirror();
+        let entries: Vec<serde_json::Value> = librevm_core::image::CATALOGUE
+            .iter()
+            .map(|e| {
+                let effective = match &chosen {
+                    Some(m) => librevm_core::image::with_mirror(e, m),
+                    None => e.clone(),
+                };
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "url": effective.url,
+                    "original_url": e.url,
+                    "arch": e.arch,
+                    "download_mib": e.download_mib,
+                    "disk_mib": e.disk_mib,
+                    "mirrored": effective.url != e.url,
+                    "cached": librevm_core::image::cache_path(&self.store.images_dir(), &effective).is_file(),
+                })
+            })
+            .collect();
+        to_json(&serde_json::json!({
+            "ok": true,
+            "mirror": chosen,
+            "mirrors": librevm_core::image::MIRRORS
+                .iter()
+                .map(|(n, u)| serde_json::json!({ "name": n, "url": u }))
+                .collect::<Vec<_>>(),
+            "images": entries,
+        }))
+    }
+
+    /// Download an image and turn it into a disk, optionally attaching it to a machine.
+    ///
+    /// This is the long one. It runs on the bus in a blocking way, so a large download
+    /// makes the caller wait; the GUI shows its own progress state and treats the call as
+    /// the unit of work.
+    async fn deploy_image(
+        &self,
+        id: String,
+        name: String,
+        size_mib: u64,
+        attach_to: String,
+        as_root: bool,
+    ) -> String {
+        let result = (|| -> Result<serde_json::Value> {
+            let entry = librevm_core::image::find(&id)
+                .with_context(|| format!("no image called {id}"))?;
+            let effective = match librevm_core::image::chosen_mirror() {
+                Some(m) => librevm_core::image::with_mirror(entry, &m),
+                None => entry.clone(),
+            };
+
+            // The key has to exist before the image is built, because it goes into it.
+            let key = librevm_core::ssh::ensure_keypair(self.store.root())?;
+            let dns = librevm_core::image::host_nameservers();
+
+            let deployed = librevm_core::image::deploy(
+                &self.store.images_dir(),
+                &effective,
+                &name,
+                if size_mib > 0 { Some(size_mib) } else { None },
+                &librevm_core::image::Injections {
+                    authorized_key: Some(key),
+                    ssh_user: Some(librevm_core::ssh::USER.to_string()),
+                    dns,
+                    root_password: None,
+                },
+                |_, _| {},
+            )?;
+
+            let mut attached = false;
+            if !attach_to.is_empty() && attach_to != "-" {
+                let mut vm = self.store.load(&attach_to)?;
+                vm.disks.push(librevm_core::config::DiskConfig {
+                    path: deployed.path.clone(),
+                    readonly: false,
+                    root: as_root,
+                    label: Some(name.clone()),
+                });
+                vm.validate()?;
+                self.store.save(&vm)?;
+                attached = true;
+            }
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": deployed.path.display().to_string(),
+                "size_mib": deployed.size_mib,
+                "notes": deployed.notes,
+                "attached": attached,
+                "machine": if attached { attach_to } else { String::new() },
+            }))
+        })();
+        match result {
+            Ok(v) => to_json(&v),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// Install an SSH key and the first-boot sshd setup into an existing disk image.
+    ///
+    /// This is the one-click part: an image that was made elsewhere, or one deployed
+    /// before the key existed, gets the same treatment without being rebuilt.
+    async fn deploy_ssh(&self, image: String, user: String) -> String {
+        let result = (|| -> Result<serde_json::Value> {
+            let path = std::path::PathBuf::from(&image);
+            if !path.is_file() {
+                bail!("{} is not a file", path.display());
+            }
+            let user = if user.is_empty() {
+                librevm_core::ssh::USER.to_string()
+            } else {
+                user
+            };
+            let key = librevm_core::ssh::ensure_keypair(self.store.root())?;
+            let dns = librevm_core::image::host_nameservers();
+
+            let injections = librevm_core::image::Injections {
+                authorized_key: Some(key),
+                ssh_user: Some(user.clone()),
+                dns,
+                root_password: None,
+            };
+
+            let notes = librevm_core::image::inject_into_image(&path, &injections)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "image": path.display().to_string(),
+                "user": user,
+                "notes": notes,
+            }))
+        })();
+        match result {
+            Ok(v) => to_json(&v),
+            Err(e) => error_json(&e),
+        }
+    }
+
+    /// What has been downloaded, and what is deployed.
+    async fn image_status(&self) -> String {
+        let dir = librevm_core::image::cache_dir(&self.store.images_dir());
+        let mut cached = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if let Ok(m) = e.metadata() {
+                    if m.is_file() {
+                        cached.push(serde_json::json!({
+                            "name": e.file_name().to_string_lossy(),
+                            "bytes": m.len(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Disks in the images directory, with whether they look like a root filesystem.
+        let mut images = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.store.images_dir()) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("img") {
+                    continue;
+                }
+                let meta = e.metadata().ok();
+                images.push(serde_json::json!({
+                    "name": e.file_name().to_string_lossy(),
+                    "path": p.display().to_string(),
+                    "bytes": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                    "on_disk": meta.as_ref().map(|m| {
+                        #[cfg(unix)]
+                        { use std::os::unix::fs::MetadataExt; m.blocks() * 512 }
+                        #[cfg(not(unix))]
+                        { m.len() }
+                    }).unwrap_or(0),
+                }));
+            }
+        }
+        images.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+        to_json(&serde_json::json!({
+            "ok": true,
+            "cached": cached,
+            "images": images,
+            "ssh_key": librevm_core::ssh::exists(self.store.root()),
+        }))
+    }
+
     /// Remove a machine and everything it owns.
     async fn delete_machine(&self, name: String) -> String {
         let result = (|| -> Result<String> {

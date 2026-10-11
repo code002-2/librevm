@@ -145,6 +145,34 @@ impl Client {
         self.call("NetStatus", &())
     }
 
+    /// The images that can be fetched, and the mirrors available.
+    pub fn image_catalogue(&self) -> Result<Value> {
+        self.call("ImageCatalogue", &())
+    }
+
+    /// What is downloaded and what is deployed.
+    pub fn image_status(&self) -> Result<Value> {
+        self.call("ImageStatus", &())
+    }
+
+    /// Download an image and make a disk out of it. This is the long call: it does the
+    /// whole download and unpack before returning.
+    pub fn deploy_image(
+        &self,
+        id: &str,
+        name: &str,
+        size_mib: u64,
+        attach_to: &str,
+        as_root: bool,
+    ) -> Result<Value> {
+        self.call("DeployImage", &(id, name, size_mib, attach_to, as_root))
+    }
+
+    /// Install the SSH key and the first-boot sshd setup into an existing image.
+    pub fn deploy_ssh(&self, image: &str, user: &str) -> Result<Value> {
+        self.call("DeploySsh", &(image, user))
+    }
+
     pub fn delete_machine(&self, name: &str) -> Result<String> {
         self.acted("DeleteMachine", &(name,))
     }

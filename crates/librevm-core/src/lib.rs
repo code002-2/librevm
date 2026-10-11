@@ -8,7 +8,9 @@ pub mod backend;
 pub mod config;
 pub mod disk;
 pub mod hub;
+pub mod image;
 pub mod net;
+pub mod ssh;
 pub mod store;
 pub mod vm;
 
