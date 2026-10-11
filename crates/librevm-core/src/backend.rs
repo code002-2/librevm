@@ -275,6 +275,26 @@ pub fn build_command(
         args.push("--disable-sandbox".to_string());
     }
 
+    // Turn off the devices that cannot work here.
+    //
+    // On this class of device virtio-balloon kills crosvm with SIGBUS the moment the
+    // guest's driver probes it, and crosvm adds one by default. It is not a device
+    // anybody asked for -- it is a memory-reclaiming helper -- so declining it costs
+    // nothing and is the difference between a machine that boots and one that does not.
+    //
+    // This was found the hard way. An earlier version of this file disabled a fixed set
+    // of defaults on the strength of one observation, concluded that virtio as a whole
+    // was unusable on Gunyah, and wrote that down. It is not: with the balloon gone,
+    // virtio-blk mounts and reads and writes, and virtio-net comes up.
+    args.push("--no-balloon".to_string());
+
+    // The rest of crosvm's default devices are harmless here, but a VM that is not asked
+    // for a random number generator does not need one, and neither does it need an xHCI
+    // controller or performance counters.
+    args.push("--no-rng".to_string());
+    args.push("--no-pmu".to_string());
+    args.push("--no-smt".to_string());
+
     // Kernel command line. Force the console parameters the emulated UART needs,
     // without duplicating anything the operator already asked for.
     let cmdline = ensure_console_params(&vm.boot.cmdline);

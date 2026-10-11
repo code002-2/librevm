@@ -1,140 +1,99 @@
-# The virtio problem on Gunyah
+# virtio on Gunyah
 
-Recorded so nobody has to rediscover it.
+A correction, kept because the wrong version of this was written down and acted on.
 
-## What happens
+## The short version
 
-Any virtio device whose driver probes in the guest kills crosvm with `SIGBUS`
-(exit 135) once the driver programs the queue.
+**crosvm enables `virtio-balloon` by default, and on this device that device kills it
+with `SIGBUS` as soon as the guest's driver probes it.**
 
-Confirmed twice, with a control:
+Add `--no-balloon` and everything works: virtio-blk disks mount and read and write,
+virtio-net comes up, the machine boots.
 
-| guest driver | device present | result |
+```sh
+crosvm run --hypervisor gunyah --protected-vm-without-firmware \
+  --mem 256 --swiotlb 64 --cpus 1 --disable-sandbox \
+  --no-balloon \
+  --block /path/to/rootfs.img,lock=false \
+  --initrd /path/to/initramfs.cpio.gz \
+  --params 'console=ttyS0 earlycon loglevel=7' \
+  --serial type=stdout,hardware=serial,console,earlycon \
+  /path/to/Image
+```
+
+## The evidence
+
+One variable at a time, each run booting Alpine and waiting for the shell:
+
+| flags | result | virtio devices the guest saw |
 | --- | --- | --- |
-| none | virtio-blk on PCI | boots, `exit=0` |
-| virtio-net | virtio-net on PCI | `SIGBUS`, `exit=135` |
-| virtio-blk | virtio-blk on PCI | `SIGBUS`, `exit=135` |
+| none | `SIGBUS` | `[1af4:1045]` balloon, xhci, host bridge |
+| `--no-rng` | `SIGBUS` | `[1af4:1045]` still there |
+| **`--no-balloon`** | **`exit=0`** | none but the host bridge and xhci |
+| `--no-usb` | `SIGBUS` | `[1af4:1045]` |
+| `--no-pmu` | `SIGBUS` | `[1af4:1045]` |
 
-The third row is the one that matters. A guest kernel built with
-`CONFIG_VIRTIO_BLK=y` and `CONFIG_EXT4_FS=y` dies as soon as the block driver
-touches the device, and the second row shows that merely *offering* a virtio
-device is harmless. So the fault is in what the driver does -- programming a
-virtqueue and then reading it back -- not in device creation.
+`[1af4:1045]` is virtio-balloon. virtio-rng is `[1af4:1005]`, which is why `--no-rng`
+changed nothing -- the device that stayed behind was the balloon, not the RNG.
 
-## Where it dies
-
-A gdb backtrace from the virtio-net case:
+With `--no-balloon`, and a 512 MiB ext4 image attached:
 
 ```
-Thread 7 "v_net:0" received signal SIGBUS
-#0  SplitQueue::peek ()
-#1  ...   (roughly 18000 frames of Queue::peek with no symbols)
+virtio_blk virtio0: 1/0/0 default/read/poll queues
+virtio_blk virtio0: [vda] 1048576 512-byte logical blocks (537 MB/512 MiB)
+EXT4-fs (vda): mounted filesystem 0f912a50-... r/w with ordered data mode
+MOUNT-OK
+WRITE-OK
 ```
 
-and the guest reaches this point:
+and with a tap device attached, the machine still exits cleanly and the guest enumerates
+`[1af4:1041]`, which is virtio-net.
 
-```
-pci 0000:00:02.0: [1af4:1041] type 00 class 0x020000   <- virtio-net
-```
+## What the earlier version of this file claimed, and why it was wrong
 
-so the device enumerates and the driver starts, then the host faults reading a
-queue the guest owns.
+It said every virtio device was unusable on Gunyah, that lent memory made the host
+unable to service a virtqueue, and that fixing it needed a kernel module plus a boot shim
+of the kind DroidVM describes in its own plans.
 
-## Why
+That was inferred from two things: virtio-net appeared to crash when the guest enumerated
+it, and a guest kernel *without* any virtio driver booted fine. Both observations were
+real; the conclusion did not follow.
 
-crosvm has to read guest memory to service a virtqueue. On Gunyah the memory is
-lent to the VM, and a lent region is one the host cannot touch. Reading it faults.
+* The virtio-net runs were made before the balloon was identified, so the balloon was
+  present in them.
+* "No driver, no crash" was read as "the driver is what crashes" when it also fits "the
+  balloon is what crashes, and a guest that cannot drive anything never probes it".
 
-Under Gunyah's resource manager the choice is not free. `SET_USER_MEM_REGION` is
-refused outright with `ENODEV`, so a VM can only be started through the lend
-path, which is what `--protected-vm-without-firmware` selects. There is no
-share-back ioctl in this kernel's driver, so once memory is lent the host cannot
-get it back.
+The decisive test was varying one flag at a time. It should have been the first thing
+tried, not the last.
 
-DroidVM solves this with a *pseudo-unprotected* mode: lend a small boot region so
-the resource manager accepts the VM, then share the real guest RAM back with
-`GUNYAH_MEM_FORCE_SHARE` before the payload runs. That returns host access, and a
-host that can read guest memory can service virtqueues.
+There is a second trap in the flags: crosvm's default set is wider than it looks.
+`--no-balloon` is not enough on its own if something else in the default set is also
+fatal on a given device -- here nothing else was, but assuming that is how the earlier
+mistake got made in the first place.
 
-It is worth being precise about what that costs, because "DroidVM can do it" is
-the obvious thing to conclude and it is not true yet:
+## What this means for the project
 
-* **It needs three pieces, not one.** A kernel module of their own
-  (`gunyah_share_mod`, exposing `/dev/gunyah_share` and a `GHSM_SHARE_BLOB`
-  ioctl), a patched crosvm that calls it, and a **guest-side boot shim written in
-  assembly** that runs with the MMU and caches off, finds the resource manager's
-  message queue capability in the device tree, sends `MEM_ACCEPT` for each
-  parcel, rewrites `/memory`, cleans the caches and jumps to the real kernel.
-* **Their own plan document says it is a draft.** `PSEUDO_UNPROTECTED_SHIM_PLAN.md`
-  in their meta repository opens with "2026-08-18. Draft, **not yet
-  implemented**", and its fact table records that on 8 Gen 3 the resource manager
-  answers `ENODEV` -- exactly what this device does. It notes that 8e/8e5 are
-  *less* restrictive.
-* **Their ordinary mode is the same as ours.** `PROTECTED_WITHOUT_FIRMWARE`, which
-  is what their UI defaults to and what this project uses, lends guest memory and
-  therefore cannot service virtio either. So their networking and disks work only
-  under the pseudo-unprotected mode, which is still being built.
-
-There is one more lead worth recording, though it is not one this project can
-take: the driver on this device does have `gunyah_rm_mem_share` and
-`gunyah_rm_mem_reclaim` behind it, and `GH_VM_RECLAIM_REGION` exists. But reclaim
-is the balloon path -- it returns pages the guest has already freed -- not a
-general way to take a lent region back.
-
-The shipped crosvm here is unpatched, and a `PseudoUnprotected` protection type
-was tried and reverted: it built and parsed, but the resource manager still
-answered `ENODEV`, because the only ioctl that can carry `GUNYAH_MEM_FORCE_SHARE`
-is `GH_VM_ANDROID_MAP_CMA_MEM`, which applies to a file-backed region and not to
-ordinary guest RAM.
-
-Attempting it also trips a fault in the driver:
-
-```
-WARNING: drivers/virt/gunyah/vm_mgr.c:1160 at _gunyah_vm_put+0x508/0x5b8
-         [gunyah_rsc_mgr], CPU#6: crosvm
-```
-
-After enough of those the resource manager stops accepting new VMs until the
-device is rebooted.
-
-## What this means
-
-* The console works, because serial is a Unix socket and never touches guest
-  memory.
-* Anything behind virtio does not: networking, disks, shared directories,
-  ballooning, vsock, GPU.
-* Working around it needs a change in Qualcomm's Gunyah driver, not in this
-  project. The pieces here -- disk images, share definitions -- are in place and
-  will start working the moment the host can read guest memory again.
+Disks, networking and shared directories are all back on the table, and the block-device
+and network definitions the rest of this tree already writes are usable as they stand,
+once the balloon is off.
 
 ## Reproducing
 
-A guest kernel with a virtio driver is needed; one without it cannot trigger
-this. On this tree:
+A guest kernel with the virtio drivers built in is needed. On this tree:
 
 ```sh
 cd /root/mini-src
 export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 make defconfig
-./scripts/config --enable VIRTIO_PCI --enable VIRTIO_BLK \
+./scripts/config --enable VIRTIO_PCI --enable VIRTIO_BLK --enable VIRTIO_NET \
                  --enable EXT4_FS --enable DEVTMPFS
 yes "" | make olddefconfig
-make -j"$(nproc)" Image
+make -j2 Image
 ```
 
-Note that the `.config` left in that tree is an x86 one, so a build without
-`ARCH=arm64` fails with `No rule to make target 'Image'`, which is not an obvious
-message.
+Note that the `.config` left in that tree is an x86 one, so a build without `ARCH=arm64`
+fails with `No rule to make target 'Image'`, which is not an obvious message.
 
-Then:
-
-```sh
-crosvm run --hypervisor gunyah --protected-vm-without-firmware \
-  --mem 256 --swiotlb 64 --cpus 1 --disable-sandbox \
-  --block /path/to/disk.img,lock=false \
-  --params 'console=ttyS0 earlycon loglevel=7' \
-  --serial type=stdout,hardware=serial,console,earlycon \
-  /root/mini-blk-Image
-```
-
-and it exits 135.
+An initramfs is still the simplest way to get a root filesystem in, and an ext4 image
+attached with `--block` is the way to get one that persists.
