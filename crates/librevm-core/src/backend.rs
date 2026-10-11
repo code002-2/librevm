@@ -295,6 +295,34 @@ pub fn build_command(
     args.push("--no-pmu".to_string());
     args.push("--no-smt".to_string());
 
+    // A virtual GPU, when the machine asks for one.
+    //
+    // Three things about this are worth knowing, because each cost an afternoon:
+    //
+    // * crosvm run as the desktop user does not start at all here. Gunyah refuses the VM
+    //   with `unknown gh exit reason: 3`, which crosvm reports as an unknown vcpu error --
+    //   and it does that whether or not a GPU is involved, so the GPU was blamed for
+    //   something it had no part in. Run as root, the same command works.
+    // * so the daemon, which is root, runs crosvm, and the display is opened through the
+    //   desktop user's Wayland socket. That works because the socket is world-writable and
+    //   root is not stopped by the mode of the directory holding it.
+    // * the scanout only appears once something in the guest draws. A guest sitting on the
+    //   text console has a connected output and no window, which is correct rather than a
+    //   fault to chase.
+    if vm.gpu.enabled {
+        let mut gpu = format!("backend={}", vm.gpu.backend);
+        if vm.gpu.width > 0 && vm.gpu.height > 0 {
+            gpu.push_str(&format!(",width={},height={}", vm.gpu.width, vm.gpu.height));
+        }
+        args.push("--gpu".to_string());
+        args.push(gpu);
+
+        if let Some(sock) = &vm.gpu.wayland_sock {
+            args.push("--wayland-sock".to_string());
+            args.push(sock.display().to_string());
+        }
+    }
+
     // Kernel command line. Force the console parameters the emulated UART needs,
     // without duplicating anything the operator already asked for.
     let cmdline = ensure_console_params(&vm.boot.cmdline);

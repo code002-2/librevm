@@ -158,6 +158,10 @@ pub fn start(store: &Store, name: &str) -> Result<i32> {
 
     let child = Command::new(&plan.argv[0])
         .args(&plan.argv[1..])
+        // A GPU needs to know where the compositor is. crosvm reads the usual variables, so
+        // they are passed through; the daemon is root and the socket belongs to the desktop
+        // user, which works because the socket is world-writable.
+        .envs(gpu_environment(&vm))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
@@ -179,6 +183,64 @@ pub fn start(store: &Store, name: &str) -> Result<i32> {
     Ok(pid)
 }
 
+/// The environment a GPU needs, and nothing when there is no GPU.
+///
+/// crosvm opens the display by name, through `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`. The
+/// daemon runs as root and has neither, so a GPU-enabled machine started from the window or
+/// from `librevm start` would fail to open a display with a message that says only
+/// "unsupported by the implementation". Handing it the session's own variables is what makes
+/// a window appear.
+///
+/// The session is found rather than assumed: the first user with a Wayland socket under
+/// `/run/user` wins, which on a single-seat device is the one at the screen.
+fn gpu_environment(vm: &VmConfig) -> Vec<(String, String)> {
+    if !vm.gpu.enabled {
+        return Vec::new();
+    }
+
+    // An explicit socket in the definition beats any search.
+    if let Some(sock) = &vm.gpu.wayland_sock {
+        let mut env = Vec::new();
+        if let Some(dir) = sock.parent() {
+            env.push(("XDG_RUNTIME_DIR".to_string(), dir.display().to_string()));
+        }
+        if let Some(name) = sock.file_name() {
+            env.push(("WAYLAND_DISPLAY".to_string(), name.to_string_lossy().into_owned()));
+        }
+        return env;
+    }
+
+    let Ok(entries) = std::fs::read_dir("/run/user") else {
+        return Vec::new();
+    };
+    let mut ids: Vec<u32> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|id| *id >= 1000)
+        .collect();
+    ids.sort_unstable();
+
+    for id in ids {
+        let dir = std::path::PathBuf::from(format!("/run/user/{id}"));
+        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let mut sockets: Vec<String> = files
+            .flatten()
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with("wayland-").then_some(n)
+            })
+            .collect();
+        sockets.sort();
+        if let Some(name) = sockets.into_iter().next() {
+            return vec![
+                ("XDG_RUNTIME_DIR".to_string(), dir.display().to_string()),
+                ("WAYLAND_DISPLAY".to_string(), name),
+            ];
+        }
+    }
+    Vec::new()
+}
+
 /// Run a VM in the foreground, with its console on our stdout.
 ///
 /// Returns the process exit status.
@@ -190,6 +252,7 @@ pub fn run_foreground(store: &Store, name: &str) -> Result<i32> {
 
     let status = Command::new(&plan.argv[0])
         .args(&plan.argv[1..])
+        .envs(gpu_environment(&vm))
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

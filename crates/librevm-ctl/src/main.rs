@@ -1625,6 +1625,7 @@ fn cmd_create(
         disks: Vec::new(),
         shared_dirs: Vec::new(),
         network: Default::default(),
+        gpu: Default::default(),
         description,
     };
 

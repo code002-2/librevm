@@ -462,9 +462,72 @@ pub struct VmConfig {
     #[serde(default, skip_serializing_if = "is_default_net")]
     pub network: NetConfig,
 
+    /// A virtual GPU.
+    #[serde(default, skip_serializing_if = "is_default_gpu")]
+    pub gpu: GpuConfig,
+
     /// Free-form description, purely for the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Leave the section out of a definition that does not use it.
+fn is_default_gpu(g: &GpuConfig) -> bool {
+    !g.enabled
+}
+
+/// A virtio-gpu device, and the window it draws into.
+///
+/// Two things have to line up for this to be useful, and both are easy to get wrong:
+///
+/// * the guest kernel must have `CONFIG_DRM_VIRTIO_GPU` built in. Our guest images boot from
+///   an initramfs with no module tree, so a modular driver is simply absent and the device
+///   is enumerated with nothing bound to it. `kernels/mini-gpu2-Image` is built for this.
+/// * the display has to be opened by a process that can reach the compositor. crosvm run as
+///   the desktop user cannot start at all on this device -- Gunyah refuses the VM with
+///   `unknown gh exit reason: 3` -- while run as root it works, and root can reach the
+///   user's Wayland socket because the socket itself is world-writable. So the command
+///   carries the socket path and the environment, and the daemon, which is root, runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuConfig {
+    /// Whether to attach a virtio-gpu at all. Off by default: the guest kernel has to
+    /// support it, and a device nothing can drive is only noise in the log.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// `2d`, `virglrenderer` or `gfxstream`. 2d needs no host GPU stack and is all that
+    /// shows a framebuffer; the others want a renderer this device does not have.
+    #[serde(default = "default_gpu_backend")]
+    pub backend: String,
+
+    /// Width and height of the window. Zero means "let the guest choose", which is what a
+    /// kernel with fbdev emulation does on its own.
+    #[serde(default)]
+    pub width: u32,
+
+    #[serde(default)]
+    pub height: u32,
+
+    /// The Wayland socket to draw on. Left empty, the daemon fills in the desktop user's,
+    /// which is what an operator wants almost every time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wayland_sock: Option<PathBuf>,
+}
+
+fn default_gpu_backend() -> String {
+    "2d".to_string()
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_gpu_backend(),
+            width: 0,
+            height: 0,
+            wayland_sock: None,
+        }
+    }
 }
 
 /// Leave the section out of a definition that does not use it.

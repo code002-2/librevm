@@ -776,6 +776,7 @@ pub fn present_create_dialog<F: Fn() + 'static>(
                 shared_dirs: Vec::new(),
                 serial: Default::default(),
                 network: Default::default(),
+                gpu: Default::default(),
                 description: None,
             };
 
