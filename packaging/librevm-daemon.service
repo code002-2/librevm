@@ -56,7 +56,12 @@ DeviceAllow=/dev/loop-control rw
 DeviceAllow=block-loop rwm
 DevicePolicy=closed
 # The console hubs spawn crosvm, which wants a good deal of the system.
-SystemCallFilter=@system-service
+#
+# @system-service does not include mount, umount2 or the newer mount API, so deploying an
+# image -- which loop-mounts it to unpack a rootfs into it -- was killed by seccomp before
+# it reached mount. The two mount-family sets are added explicitly rather than dropping the
+# filter, because the filter is worth keeping.
+SystemCallFilter=@system-service @mount
 SystemCallErrorNumber=EPERM
 
 [Install]

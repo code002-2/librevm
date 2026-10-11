@@ -489,6 +489,90 @@ pub fn make_image(path: &Path, size_mib: u64) -> Result<()> {
     Ok(())
 }
 
+/// Mount an image on a loop device.
+///
+/// The `mount(8)` program is not used, and neither is `losetup`. Both are setuid helpers
+/// that hand the actual work to a kernel call, and under a unit with `NoNewPrivileges=yes`
+/// the setuid bit does nothing -- so `mount` refuses with a bare "permission denied" that
+/// does not say why. Calling the kernel directly is both simpler and unaffected by that.
+#[cfg(unix)]
+fn mount_loop(device: &str, target: &Path, readonly: bool) -> Result<()> {
+    use std::ffi::CString;
+
+    let source = CString::new(device).context("the device name has a NUL in it")?;
+    let target_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("the mount point has a NUL in it")?;
+    // ext4 is what these images are made with; being explicit means the kernel does not
+    // have to probe, which it cannot do without the blkid helper anyway.
+    let fstype = CString::new("ext4").unwrap();
+
+    let mut flags = libc::MS_NOSUID | libc::MS_NODEV;
+    if readonly {
+        flags |= libc::MS_RDONLY;
+    } else {
+        flags |= libc::MS_NOATIME;
+    }
+
+    // SAFETY: the three C strings outlive the call, and a null data pointer is what the
+    // syscall wants when there are no filesystem-specific options.
+    let rc = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target_c.as_ptr(),
+            fstype.as_ptr(),
+            flags,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        bail!("mount {device} on {}: {e}", target.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn mount_loop(_device: &str, _target: &Path, _readonly: bool) -> Result<()> {
+    bail!("mounting needs Unix")
+}
+
+/// Unmount, by the same reasoning as `mount_loop`.
+#[cfg(unix)]
+fn unmount(target: &Path) -> Result<()> {
+    use std::ffi::CString;
+    let c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("the mount point has a NUL in it")?;
+    // MNT_DETACH, so a busy mount still goes away rather than failing and leaving the
+    // loop device attached to a filesystem nothing can release.
+    let rc = unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        bail!("unmounting {}: {e}", target.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unmount(_target: &Path) -> Result<()> {
+    bail!("unmounting needs Unix")
+}
+
+/// Mount, for a caller that is not this module.
+///
+/// The CLI has its own unpack path and used to shell out to `mount(8)`; it had the same
+/// problem under the daemon's unit, so it goes through here now.
+pub fn mount_loop_for_cli(device: &str, target: &Path) -> Result<()> {
+    mount_loop(device, target, false)
+}
+
+/// Unmount, for a caller that is not this module. Failure is logged and dropped, because
+/// there is nothing useful a caller can do about it and the loop device is detached next.
+pub fn unmount_for_cli(target: &Path) {
+    if let Err(e) = unmount(target) {
+        log::warn!("{e}");
+    }
+}
+
 /// A loop device that unmounts and detaches when it goes out of scope.
 struct LoopMount {
     loop_device: String,
@@ -525,24 +609,19 @@ impl LoopMount {
             mounted: false,
         };
 
-        let out = Command::new("mount")
-            .args([
-                &guard.loop_device,
-                &guard.mount_point.display().to_string(),
-            ])
-            .output()
-            .context("running mount")?;
-        if !out.status.success() {
-            bail!(
-                "mounting {} failed: {}",
-                guard.loop_device,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        if let Err(e) = mount_loop(&guard.loop_device, &guard.mount_point, false) {
+            return Err(e);
         }
         guard.mounted = true;
 
         // `--numeric-owner` keeps the archive's uid and gid rather than mapping them
         // through this machine's passwd, which is what a rootfs needs.
+        //
+        // `--no-same-permissions` leaves the setuid and setgid bits off. A distribution
+        // rootfs carries several -- `su`, `passwd`, `doas` -- and restoring them needs a
+        // privilege the daemon's unit deliberately withholds, so `tar` fails on the first
+        // one. Nothing is lost: these filesystems are only ever used inside a guest where
+        // the operator is already root, so the bits have nothing to do.
         let out = Command::new("tar")
             .args([
                 "-x",
@@ -552,6 +631,7 @@ impl LoopMount {
                 "-C",
                 &guard.mount_point.display().to_string(),
                 "--numeric-owner",
+                "--no-same-permissions",
                 // Some rootfs tarballs carry a leading ./ that is harmless, and some carry
                 // device nodes this container cannot make. Neither is worth failing for.
                 "--warning=no-unknown-keyword",
@@ -559,9 +639,21 @@ impl LoopMount {
             .output()
             .with_context(|| format!("unpacking {}", archive.display()))?;
         if !out.status.success() {
-            bail!(
-                "tar failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+            // A few setuid files failing is not worth refusing the whole deployment, and
+            // it is what a first run against a new distribution tends to produce. Only
+            // treat it as fatal if tar reported something other than permissions.
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let only_permissions = stderr
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .all(|l| l.contains("Cannot change mode") || l.contains("无法将模式改为"));
+            if !only_permissions {
+                bail!("tar failed: {}", stderr.trim());
+            }
+            log::warn!(
+                "some setuid modes could not be restored while unpacking {}; the filesystem \
+                 is otherwise complete",
+                archive.display()
             );
         }
 
@@ -576,9 +668,11 @@ impl LoopMount {
 impl Drop for LoopMount {
     fn drop(&mut self) {
         if self.mounted {
-            let _ = Command::new("umount")
-                .arg(&self.mount_point)
-                .output();
+            // Reported rather than ignored: a mount left behind keeps the loop device busy
+            // and the next deploy of the same image fails in a way that points nowhere.
+            if let Err(e) = unmount(&self.mount_point) {
+                log::warn!("{e}");
+            }
         }
         let _ = Command::new("losetup")
             .args(["--detach", &self.loop_device])
@@ -614,17 +708,11 @@ pub fn inject_into_image(image: &Path, what: &Injections) -> Result<Vec<String>>
     std::fs::create_dir_all(&mount_point)?;
 
     let result = (|| -> Result<Vec<String>> {
-        let out = Command::new("mount")
-            .args([&loop_device, &mount_point.display().to_string()])
-            .output()
-            .context("running mount")?;
-        if !out.status.success() {
-            bail!("mount: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
+        mount_loop(&loop_device, &mount_point, false)?;
         inject(&mount_point, what)
     })();
 
-    let _ = Command::new("umount").arg(&mount_point).output();
+    unmount_for_cli(&mount_point);
     let _ = Command::new("losetup")
         .args(["--detach", &loop_device])
         .output();
@@ -634,10 +722,19 @@ pub fn inject_into_image(image: &Path, what: &Injections) -> Result<Vec<String>>
 }
 
 /// Write a file into a deployed image, for injecting keys and config.
+///
+/// A symlink in the way is replaced rather than written through: a rootfs carries links
+/// into `/run`, which is a tmpfs and therefore empty in a tree that has just been unpacked,
+/// so following one fails with a message about a path the caller never mentioned.
 pub fn write_into_dir(root: &Path, relative: &str, contents: &str, mode: u32) -> Result<()> {
     let path = root.join(relative.trim_start_matches('/'));
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+    }
+    if path.is_symlink() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("replacing the symlink at {}", path.display()))?;
     }
     std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
@@ -665,18 +762,39 @@ pub struct Injections {
 }
 
 /// Apply the injections to a mounted rootfs.
+///
+/// Each step says which step it was, because "No such file or directory" on its own does
+/// not distinguish a missing directory in the image from a missing tool on the host.
 pub fn inject(root: &Path, what: &Injections) -> Result<Vec<String>> {
     let mut notes = Vec::new();
 
     // Resolv.conf, so the guest can install packages before anything else is configured.
     if !what.dns.is_empty() {
-        std::fs::create_dir_all(root.join("etc"))?;
+        let etc = root.join("etc");
+        // A rootfs usually has /etc, but an image built for a container sometimes has it
+        // as a symlink into /usr, which `create_dir_all` refuses to treat as a directory.
+        if !etc.is_dir() {
+            std::fs::create_dir_all(&etc)
+                .with_context(|| format!("creating {}", etc.display()))?;
+        }
+        let path = etc.join("resolv.conf");
+
+        // Debian and Ubuntu ship this as a symlink to
+        // /run/systemd/resolve/stub-resolv.conf, and /run is a tmpfs that is empty in a
+        // freshly unpacked tree -- so writing through the link fails with a "No such file
+        // or directory" that names a path nobody asked for. Replacing the link with a real
+        // file is what a container image build does too.
+        if path.is_symlink() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("replacing the symlink at {}", path.display()))?;
+        }
+
         let body: String = what
             .dns
             .iter()
             .map(|d| format!("nameserver {d}\n"))
             .collect();
-        std::fs::write(root.join("etc/resolv.conf"), body)?;
+        std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
         notes.push(format!("resolver set to {}", what.dns.join(", ")));
     }
 
@@ -687,23 +805,24 @@ pub fn inject(root: &Path, what: &Injections) -> Result<Vec<String>> {
             format!("home/{user}")
         };
         let dir = root.join(&home).join(".ssh");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("authorized_keys"), format!("{key}\n"))?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating {} for the key", dir.display()))?;
+        let keys = dir.join("authorized_keys");
+        std::fs::write(&keys, format!("{key}\n"))
+            .with_context(|| format!("writing {}", keys.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-            std::fs::set_permissions(
-                dir.join("authorized_keys"),
-                std::fs::Permissions::from_mode(0o600),
-            )?;
+            std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600))?;
         }
 
         // sshd is not installed in a bare rootfs and the configuration differs between
         // distributions, so the first boot is given a script to run instead of guessing
         // here. It is written for each family, and harmless on the others.
         let firstboot = firstboot_script(user, &what.dns);
-        write_into_dir(root, "etc/librevm-firstboot.sh", &firstboot, 0o755)?;
+        write_into_dir(root, "etc/librevm-firstboot.sh", &firstboot, 0o755)
+            .context("writing the first-boot script")?;
         notes.push(format!("SSH key installed for {user}"));
         notes.push("sshd is installed on first boot, which needs a network".to_string());
     }

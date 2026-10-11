@@ -991,13 +991,10 @@ fn unpack_into(
 
     // Everything from here has to be undone, including on the error paths.
     let result = (|| -> Result<Vec<String>> {
-        let out = std::process::Command::new("mount")
-            .args([&loop_device, &mount_point.display().to_string()])
-            .output()
-            .context("running mount")?;
-        if !out.status.success() {
-            bail!("mount: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
+        // The same helper the daemon uses: `mount(8)` is a setuid program and refuses to
+        // do anything under a unit that forbids gaining privileges, with a message that
+        // does not say so.
+        librevm_core::image::mount_loop_for_cli(&loop_device, &mount_point)?;
 
         let out = std::process::Command::new("tar")
             .args([
@@ -1008,6 +1005,9 @@ fn unpack_into(
                 "-C",
                 &mount_point.display().to_string(),
                 "--numeric-owner",
+                // See image.rs: the setuid bits cannot be restored under the daemon's
+                // unit, and they are not needed in a guest where root is root already.
+                "--no-same-permissions",
                 "--warning=no-unknown-keyword",
             ])
             .output()
@@ -1020,7 +1020,7 @@ fn unpack_into(
     })();
 
     // Unmount and detach whatever happened, and in that order.
-    let _ = std::process::Command::new("umount").arg(&mount_point).output();
+    librevm_core::image::unmount_for_cli(&mount_point);
     let _ = std::process::Command::new("losetup")
         .args(["--detach", &loop_device])
         .output();
