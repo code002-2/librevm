@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# librevm-enable-desktop.sh -- let a desktop user launch the window.
+#
+# The window has to run as root, because Gunyah's vcpu ioctls require privilege and
+# an ordinary user opening /dev/gunyah gets EINVAL. The shell starts launchers as the
+# desktop user, so the launcher hands over through sudo. That needs a rule naming the
+# account, which cannot be written at install time because the package does not know
+# who will use it.
+#
+# Usage:
+#   sudo librevm-enable-desktop            use SUDO_USER, or ask
+#   sudo librevm-enable-desktop USER       name the account explicitly
+#   sudo librevm-enable-desktop --remove   take the rule away
+#
+set -u
+
+RULES=/etc/sudoers.d/librevm-gui
+HELPER=/usr/bin/librevm-gui-session-root
+[ -x "$HELPER" ] || HELPER=/usr/local/bin/librevm-gui-session-root
+TEMPLATE=/usr/share/librevm/sudoers-librevm-gui
+
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die "run this with sudo"
+
+if [ "${1:-}" = "--remove" ]; then
+    if [ -f "$RULES" ]; then
+        rm -f "$RULES" && say "removed $RULES"
+    else
+        say "no rule to remove"
+    fi
+    exit 0
+fi
+
+user=${1:-${SUDO_USER:-}}
+if [ -z "$user" ] || [ "$user" = root ]; then
+    # no hint from sudo, so ask
+    printf 'Which user should be able to launch the window? '
+    read -r user
+fi
+
+[ -n "$user" ] || die "no user given"
+id "$user" >/dev/null 2>&1 || die "no such user: $user"
+
+[ -x "$HELPER" ] || die "$HELPER is missing; is librevm installed?"
+
+install -d /etc/sudoers.d
+
+# Keep the display and the session bus across the handover, or the window opens on a
+# display the user cannot see.
+{
+    echo "# Written by librevm-enable-desktop for $user."
+    echo "# The window needs root for Gunyah, but the shell starts launchers as the"
+    echo "# desktop user, and without the display variables the window lands nowhere."
+    echo "Defaults!$HELPER env_keep += \"DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE XAUTHORITY DBUS_SESSION_BUS_ADDRESS HOME\""
+    echo "$user ALL=(root) NOPASSWD: $HELPER"
+} > "$RULES"
+chmod 440 "$RULES"
+
+if visudo -c >/dev/null 2>&1; then
+    say "wrote $RULES for $user"
+    say ""
+    say "The window can now be started from the desktop, or with:"
+    say "    librevm-gui-session"
+else
+    rm -f "$RULES"
+    die "the rule did not validate and was removed; tell the maintainer"
+fi
+
+# A group for the Gunyah device, so diagnostics work without root.
+if getent group librevm >/dev/null 2>&1; then
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx librevm; then
+        say "$user is already in the librevm group"
+    else
+        usermod -aG librevm "$user" && say "added $user to the librevm group"
+    fi
+fi
+
+exit 0

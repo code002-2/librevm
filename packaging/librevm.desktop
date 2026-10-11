@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=librevm
+GenericName=Virtual Machine Manager
+Comment=Create and run virtual machines, with Gunyah support
+Comment[zh_CN]=创建并运行虚拟机，支持 Gunyah
+Exec=/usr/local/bin/librevm-gui-session
+TryExec=/usr/local/bin/librevm-gui
+Icon=librevm
+Terminal=false
+Categories=System;Emulator;
+Keywords=vm;virtual;machine;gunyah;crosvm;
+Keywords[zh_CN]=虚拟机;gunyah;crosvm;
+# No StartupWMClass on purpose. The GUI runs as root and therefore cannot own its
+# name on the desktop user's session bus, so the shell can never activate a running
+# instance. Claiming a window class here would make the shell believe the
+# application is already up and it would send an activation request into the void
+# instead of starting the process -- a second click on the icon would do nothing.
+# Leaving the association out means every click starts the launcher.
+StartupNotify=false

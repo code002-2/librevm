@@ -1,0 +1,41 @@
+#!/bin/sh
+# Run the GUI as root, inside the desktop session whose environment was handed to us.
+#
+# Split out from librevm-gui-session so the sudoers rule can name a single,
+# auditable program instead of a general shell.
+LOG=/var/log/librevm-gui.log
+{
+    echo ""
+    echo "================================================================"
+    echo "== librevm-gui-session-root $(date -Iseconds) uid=$(id -u)"
+    echo "== DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+    echo "== DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"
+} >> "$LOG" 2>/dev/null || true
+
+# If the caller could not supply a display, take one from the compositor.
+if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -S "${XDG_RUNTIME_DIR:-/nonexistent}/${WAYLAND_DISPLAY:-none}" ]; then
+    for p in $(pgrep -f 'gnome-shell|mutter' 2>/dev/null); do
+        [ -r "/proc/$p/environ" ] || continue
+        rt=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^XDG_RUNTIME_DIR=//p')
+        wl=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p')
+        if [ -n "$rt" ] && [ -n "$wl" ] && [ -S "$rt/$wl" ]; then
+            export XDG_RUNTIME_DIR="$rt"
+            export WAYLAND_DISPLAY="$wl"
+            dp=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p')
+            [ -n "$dp" ] && export DISPLAY="$dp"
+            break
+        fi
+    done
+fi
+
+export GDK_BACKEND=wayland,x11
+export NO_AT_BRIDGE=1
+
+# Installed from a package this is /usr/bin; from a build tree, /usr/local/bin.
+GUI=
+for c in /usr/bin/librevm-gui /usr/local/bin/librevm-gui; do
+    [ -x "$c" ] && { GUI=$c; break; }
+done
+[ -n "$GUI" ] || { echo "librevm-gui was not found" >&2; exit 1; }
+
+exec "$GUI" "$@" >> "$LOG" 2>&1

@@ -1,0 +1,23 @@
+# build output
+/target
+**/target
+
+# editor and OS noise
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# local state that must never be committed
+*.log
+/librevm-state/
+gui.conf
+.vm-test/
+
+# packaged output
+/dist
+
+# temporary commit message files
+.git-commit-msg

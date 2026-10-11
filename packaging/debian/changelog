@@ -1,0 +1,17 @@
+librevm (0.1.0) trixie; urgency=medium
+
+  * First release.
+  * Virtual machine definitions in TOML, with validation that rejects the
+    configurations Gunyah cannot accept.
+  * A command line tool: create, list, show, plan, status, start, run, stop,
+    console, delete.
+  * A GTK4 window: sidebar, detail pane, console, and a create dialog.
+  * A console that survives closing the window, served by a detached hub because
+    crosvm's unix-stream serial is a client that needs someone to listen first.
+  * English and Chinese, with a language menu and a remembered choice.
+  * install-gunyah: builds the Gunyah modules from a kernel tree or installs
+    prebuilt ones, verifying vermagic and branch-target support before touching
+    /lib/modules.
+  * The window checks for Gunyah on first start and offers to install it.
+
+ -- code002-2 <hiez832670@gmail.com>  Sat, 11 Oct 2026 05:00:00 +0000

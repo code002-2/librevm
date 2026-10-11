@@ -1,0 +1,8 @@
+# Gunyah's control device is 0600 root:root by default, so only root can start a
+# guest. Members of the librevm group need it too: the CLI and any future daemon
+# should not have to be root just to talk to the hypervisor.
+#
+# Note that the vcpu ioctls still require privilege on current kernels, which is why
+# the GUI is launched through sudo (see sudoers-librevm-gui). This rule is what makes
+# /dev/gunyah readable at all for a diagnostic run as an ordinary user.
+KERNEL=="gunyah", GROUP="librevm", MODE="0660"

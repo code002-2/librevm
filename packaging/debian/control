@@ -1,0 +1,27 @@
+Source: librevm
+Section: admin
+Priority: optional
+Maintainer: code002-2 <hiez832670@gmail.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc, pkg-config,
+ libgtk-4-dev, libadwaita-1-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/code002-2/librevm
+Vcs-Git: https://github.com/code002-2/librevm.git
+Vcs-Browser: https://github.com/code002-2/librevm
+Rules-Requires-Root: no
+
+Package: librevm
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: git
+Description: virtual machine manager with Gunyah support
+ librevm manages virtual machines on Linux, with first-class support for
+ Qualcomm's Gunyah hypervisor. It provides a command line tool and a GTK4
+ window, both driving the same core library.
+ .
+ It handles the parts of Gunyah that surprise people: the lend-only memory
+ path, the static swiotlb, the branch-target landing pads modules need, and a
+ serial console that survives closing the window.
+ .
+ crosvm is not in Debian and is not depended on. Install it separately and
+ point librevm at it, or place it on PATH.

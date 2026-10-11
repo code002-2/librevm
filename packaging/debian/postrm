@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs after the package's files are removed.
+set -e
+
+if [ "$1" = "purge" ]; then
+    # Only on purge. The VM definitions and the kernels in here are the operator's
+    # data, and a plain remove must not take them.
+    rm -rf /var/lib/librevm
+fi
+
+exit 0
