@@ -275,11 +275,24 @@ where
         .css_classes(["dim-label", "caption"])
         .build();
 
-    // Warnings go here, so an invalid combination is visible before Save rather than after.
+    // Two labels, because they carry different weights.
+    //
+    // The dim one is for the running total and for "swiotlb is too big", which are things to
+    // notice before pressing Save. A save that *fails* used to land here too, in the least
+    // prominent style GTK has, at the bottom of a scrolled dialog -- so a refusal looked
+    // exactly like a success and the operator walked away believing the change was applied.
+    // Failures get a banner at the top of the dialog now, where the eye already is.
     let warning = gtk4::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .css_classes(["dim-label"])
+        .build();
+
+    let error_banner = gtk4::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .css_classes(["error", "heading"])
         .build();
 
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 18);
@@ -287,6 +300,8 @@ where
     content.set_margin_bottom(18);
     content.set_margin_start(18);
     content.set_margin_end(18);
+    // First, so it is the first thing read when the dialog reappears after a failed save.
+    content.append(&error_banner);
     content.append(&identity);
     content.append(&boot);
     content.append(&resources);
@@ -615,6 +630,7 @@ where
         let on_saved = Rc::new(on_saved);
         let bridge = bridge.clone();
         let attached = attached.clone();
+        let error_banner = error_banner.clone();
         apply.connect_clicked(move |_| {
             let mut vm = original.clone();
 
@@ -705,16 +721,20 @@ where
             match outcome {
                 Ok(()) => {
                     log::info!("{}: definition saved", vm.name);
+                    error_banner.set_visible(false);
                     on_saved();
                     dialog.close();
                 }
                 Err(e) => {
-                    warning.set_markup(&format!(
-                        "<b>{}</b>\n{}",
-                        i18n::tr(i18n::Key::CouldNotSave),
-                        glib::markup_escape_text(&format!("{e:#}"))
-                    ));
+                    // Both, deliberately: the banner is unmissable, and the dim line keeps
+                    // the message next to the fields that caused it.
+                    let text = format!("{}: {e:#}", i18n::tr(i18n::Key::CouldNotSave));
+                    error_banner.set_label(&text);
+                    error_banner.set_visible(true);
+                    warning.set_label(&text);
                     log::error!("{}: could not save: {e:#}", vm.name);
+                    // A failed save must not close the dialog, or the change is lost with
+                    // no way back to it. It already does not; this is the reason.
                 }
             }
         });
