@@ -190,6 +190,13 @@ do_install() {
         "$(p /etc/udev/rules.d/60-gunyah.rules)"
     say "  /etc/udev/rules.d/60-gunyah.rules"
 
+    step "log rotation"
+    # The window's output is chatty. Without a ceiling one loop took the log to 95 GB and
+    # filled the root filesystem.
+    install -d "$(p /etc/logrotate.d)"
+    install -m 644 "$root/packaging/logrotate-librevm" "$(p /etc/logrotate.d/librevm)"
+    say "  /etc/logrotate.d/librevm"
+
     step "group membership"
     if [ -z "$DESTDIR" ] && [ -n "$DESKTOP_USER" ]; then
         # Being in the group is the whole privilege story now: it lets the account reach

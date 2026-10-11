@@ -130,4 +130,19 @@ if ! pgrep -x librevm-daemon >/dev/null 2>&1; then
     log "== warning: librevm-daemon is not running; privileged actions will fail"
 fi
 
+# Cap the file this window can write.
+#
+# A toolkit that finds itself in a loop prints a warning per iteration, and a GTK
+# callback that loops can do that millions of times a second. One such bug took this log
+# to 95 GB and filled the root filesystem, which is a bad way to learn that the launcher
+# had no ceiling at all. The limit is a backstop, not the fix: the window exits when it
+# hits it, and the bug is fixed where it was.
+LOG_LIMIT_KB=32768
+if [ "$LOG" = "$FALLBACK" ]; then
+    # /tmp is a tmpfs here, so a runaway there costs memory rather than disk. Cap it
+    # more tightly for the same reason.
+    LOG_LIMIT_KB=8192
+fi
+ulimit -f "$LOG_LIMIT_KB" 2>/dev/null || true
+
 exec "$GUI" "$@" >> "$LOG" 2>&1

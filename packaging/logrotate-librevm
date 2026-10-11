@@ -1,0 +1,20 @@
+# Rotation for librevm's logs.
+#
+# The window's output goes to /var/log/librevm-gui.log, and it is chatty: a toolkit
+# warning per redraw adds up. With no rotation at all, one such loop produced a 95 GB
+# file and filled the root filesystem, which is how this file came to exist.
+#
+# `copytruncate` because the launcher and the window both hold this file open and
+# appending; renaming it would leave them writing to a file nothing reads.
+
+/var/log/librevm-gui.log /tmp/librevm-gui.log {
+    daily
+    rotate 3
+    maxsize 32M
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+    su root root
+}

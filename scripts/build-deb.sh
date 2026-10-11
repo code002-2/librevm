@@ -87,6 +87,9 @@ install -m 644 "$root/packaging/60-gunyah.rules" "$pkgroot/usr/lib/udev/rules.d/
 # starts it at boot.
 install -m 644 "$root/packaging/org.librevm.Daemon1.conf"  "$pkgroot/usr/share/dbus-1/system.d/org.librevm.Daemon1.conf"
 install -m 644 "$root/packaging/librevm-daemon.service"    "$pkgroot/usr/lib/systemd/system/librevm-daemon.service"
+# The window's log is chatty; without rotation it once reached 95 GB.
+install -d "$pkgroot/etc/logrotate.d"
+install -m 644 "$root/packaging/logrotate-librevm"         "$pkgroot/etc/logrotate.d/librevm"
 
 install -m 644 "$root/README.md"  "$pkgroot/usr/share/doc/librevm/README.md"
 install -m 644 "$root/LICENSE"    "$pkgroot/usr/share/doc/librevm/copyright"

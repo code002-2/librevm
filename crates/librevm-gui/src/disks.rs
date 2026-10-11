@@ -22,7 +22,7 @@ use librevm_core::vm::State;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-/// Everything the panel needs to act on behalf of one machine.
+    /// Everything the panel needs to act on behalf of one machine.
 pub struct DisksPanel {
     group: adw::PreferencesGroup,
     store: Store,
@@ -33,6 +33,14 @@ pub struct DisksPanel {
     shares: Rc<std::cell::RefCell<Option<adw::PreferencesGroup>>>,
     /// The machine currently shown, so the action buttons know what to edit.
     current: Rc<std::cell::RefCell<Option<String>>>,
+    /// Exactly the rows this panel put into `group`.
+    ///
+    /// Clearing by walking `first_child()` and calling `remove()` does not work:
+    /// `adw::PreferencesGroup` keeps its own internal box, and a child it does not
+    /// recognise makes `remove()` fail while leaving `first_child()` returning the same
+    /// widget. The result is an infinite loop, and Adwaita prints a CRITICAL for each
+    /// turn of it -- which is how a console log reached 95 GB and filled the disk.
+    shown: Rc<std::cell::RefCell<Vec<gtk4::Widget>>>,
 }
 
 impl DisksPanel {
@@ -48,7 +56,26 @@ impl DisksPanel {
             parent: Rc::new(std::cell::RefCell::new(None)),
             shares: Rc::new(std::cell::RefCell::new(None)),
             current: Rc::new(std::cell::RefCell::new(None)),
+            shown: Rc::new(std::cell::RefCell::new(Vec::new())),
         })
+    }
+
+    /// Add a row and remember it, so it can be taken out again.
+    fn add(&self, child: &impl IsA<gtk4::Widget>) {
+        let widget = child.clone().upcast::<gtk4::Widget>();
+        self.group.add(&widget);
+        self.shown.borrow_mut().push(widget);
+    }
+
+    /// Take out everything this panel added.
+    fn clear(&self) {
+        for widget in self.shown.borrow_mut().drain(..) {
+            // Only remove it if Adwaita still considers it a child; otherwise `remove`
+            // fails and there is nothing to undo anyway.
+            if widget.parent().is_some() {
+                self.group.remove(&widget);
+            }
+        }
     }
 
     pub fn widget(&self) -> &adw::PreferencesGroup {
@@ -62,9 +89,7 @@ impl DisksPanel {
 
     /// Rebuild the rows for a machine. `None` clears the panel.
     pub fn render(self: &Rc<Self>, name: Option<&str>) {
-        while let Some(child) = self.group.first_child() {
-            self.group.remove(&child);
-        }
+        self.clear();
         *self.current.borrow_mut() = name.map(|s| s.to_string());
         *self.shares.borrow_mut() = None;
         let Some(name) = name else { return };
@@ -74,10 +99,10 @@ impl DisksPanel {
 
         // -- disks ----------------------------------------------------------
         if vm.disks.is_empty() {
-            self.group.add(&note(&i18n::tr(i18n::Key::NoDisks)));
+            self.add(&note(&i18n::tr(i18n::Key::NoDisks)));
         }
         for (index, d) in vm.disks.iter().enumerate() {
-            self.group.add(&self.disk_row(name, index, d));
+            self.add(&self.disk_row(name, index, d));
         }
 
         // -- shared directories ---------------------------------------------
@@ -140,12 +165,20 @@ impl DisksPanel {
         boxed.set_selection_mode(gtk4::SelectionMode::None);
         boxed.append(&add);
         row.set_child(Some(&boxed));
-        self.group.add(&row);
+        self.add(&row);
 
         if running {
-            self.group.add(&note(&i18n::tr(i18n::Key::RestartToApply)));
+            self.add(&note(&i18n::tr(i18n::Key::RestartToApply)));
         }
-        self.group.add(&note(&i18n::tr(i18n::Key::VirtioWarning)));
+        self.add(&note(&i18n::tr(i18n::Key::VirtioWarning)));
+    }
+
+    /// The shares, built during `render`, if this machine has any.
+    ///
+    /// The detail pane adds this to its own holder box rather than nesting it inside the
+    /// disks group, which Adwaita does not allow.
+    pub fn shares(&self) -> Option<adw::PreferencesGroup> {
+        self.shares.borrow().clone()
     }
 
     fn disk_row(self: &Rc<Self>, name: &str, index: usize, d: &DiskConfig) -> adw::ActionRow {
@@ -456,16 +489,6 @@ impl DisksPanel {
         // only needed when there is more than one.
         let _ = parent;
         dialog.present();
-    }
-}
-
-/// A second group holding the shares, filled in during `render`.
-///
-/// It is kept behind a `RefCell` on the panel because `adw::PreferencesGroup` cannot be
-/// nested inside another one; the detail pane queries this after rendering.
-impl DisksPanel {
-    pub fn shares(&self) -> Option<adw::PreferencesGroup> {
-        self.shares.borrow().clone()
     }
 }
 
