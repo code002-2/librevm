@@ -51,14 +51,41 @@ path, which is what `--protected-vm-without-firmware` selects. There is no
 share-back ioctl in this kernel's driver, so once memory is lent the host cannot
 get it back.
 
-DroidVM solves this with a *pseudo-unprotected* mode: lend so the resource
-manager accepts, then map the same window again with `GUNYAH_MEM_FORCE_SHARE`
-before the payload runs, which returns host access. That is a patch to crosvm. I
-wrote it -- `ProtectionType::PseudoUnprotected` plus the
-`--protected-vm-pseudo-unprotected` flag -- and it builds and parses, but the
-resource manager still answers `ENODEV`, because the only ioctl that can carry
-`GUNYAH_MEM_FORCE_SHARE` is `GH_VM_ANDROID_MAP_CMA_MEM`, which applies to a
-file-backed region and not to ordinary guest RAM.
+DroidVM solves this with a *pseudo-unprotected* mode: lend a small boot region so
+the resource manager accepts the VM, then share the real guest RAM back with
+`GUNYAH_MEM_FORCE_SHARE` before the payload runs. That returns host access, and a
+host that can read guest memory can service virtqueues.
+
+It is worth being precise about what that costs, because "DroidVM can do it" is
+the obvious thing to conclude and it is not true yet:
+
+* **It needs three pieces, not one.** A kernel module of their own
+  (`gunyah_share_mod`, exposing `/dev/gunyah_share` and a `GHSM_SHARE_BLOB`
+  ioctl), a patched crosvm that calls it, and a **guest-side boot shim written in
+  assembly** that runs with the MMU and caches off, finds the resource manager's
+  message queue capability in the device tree, sends `MEM_ACCEPT` for each
+  parcel, rewrites `/memory`, cleans the caches and jumps to the real kernel.
+* **Their own plan document says it is a draft.** `PSEUDO_UNPROTECTED_SHIM_PLAN.md`
+  in their meta repository opens with "2026-08-18. Draft, **not yet
+  implemented**", and its fact table records that on 8 Gen 3 the resource manager
+  answers `ENODEV` -- exactly what this device does. It notes that 8e/8e5 are
+  *less* restrictive.
+* **Their ordinary mode is the same as ours.** `PROTECTED_WITHOUT_FIRMWARE`, which
+  is what their UI defaults to and what this project uses, lends guest memory and
+  therefore cannot service virtio either. So their networking and disks work only
+  under the pseudo-unprotected mode, which is still being built.
+
+There is one more lead worth recording, though it is not one this project can
+take: the driver on this device does have `gunyah_rm_mem_share` and
+`gunyah_rm_mem_reclaim` behind it, and `GH_VM_RECLAIM_REGION` exists. But reclaim
+is the balloon path -- it returns pages the guest has already freed -- not a
+general way to take a lent region back.
+
+The shipped crosvm here is unpatched, and a `PseudoUnprotected` protection type
+was tried and reverted: it built and parsed, but the resource manager still
+answered `ENODEV`, because the only ioctl that can carry `GUNYAH_MEM_FORCE_SHARE`
+is `GH_VM_ANDROID_MAP_CMA_MEM`, which applies to a file-backed region and not to
+ordinary guest RAM.
 
 Attempting it also trips a fault in the driver:
 
@@ -68,8 +95,7 @@ WARNING: drivers/virt/gunyah/vm_mgr.c:1160 at _gunyah_vm_put+0x508/0x5b8
 ```
 
 After enough of those the resource manager stops accepting new VMs until the
-device is rebooted. That work has been reverted; the shipped crosvm is
-unpatched.
+device is rebooted.
 
 ## What this means
 
