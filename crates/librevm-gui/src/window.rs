@@ -549,9 +549,18 @@ fn fill(window: &adw::ApplicationWindow) {
     {
         let store = store.clone();
         let repopulate = repopulate.clone();
+        let pane = view.clone();
+        let selected = selected.clone();
         view.on_changed(move || {
             let _ = &store;
             repopulate();
+            // The sidebar only carries a name and a state, so rebuilding it is not enough
+            // after a settings change: the pane's numbers -- memory, CPU count, the disks,
+            // the network -- are read from the definition in `show`, and they were still the
+            // old ones. A save that changed the memory looked as though it had not happened.
+            if let Some(name) = selected.borrow().clone() {
+                pane.show(&name);
+            }
         });
     }
 

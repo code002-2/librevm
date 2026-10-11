@@ -696,11 +696,15 @@ where
 
             // The console socket and log are filled in by the store when missing, so
             // nothing here has to know about them.
-            let outcome = vm.validate().and_then(|_| {
+            //
+            // `validate` is deliberately *not* called on this side. It checks that every
+            // path in the definition exists, and this process is the desktop user: a kernel
+            // or initramfs under root's home -- which is 0700 -- comes back as missing, and
+            // the save was refused for a file the daemon, running as root, reads perfectly
+            // well. The check belongs where the privileges are, so the daemon does it.
+            let outcome: anyhow::Result<()> = (|| {
                 let text = vm.to_toml()?;
                 match bridge.client() {
-                    // The store belongs to root and setting the tap up needs root, so the
-                    // daemon does both. This is the path the window normally takes.
                     Some(client) => {
                         client.save_machine(&text)?;
                         Ok(())
@@ -708,6 +712,7 @@ where
                     // No daemon: only works if this process is root, which happens when
                     // the window was started that way deliberately.
                     None => {
+                        vm.validate()?;
                         if vm.network.enabled {
                             librevm_core::net::setup(vm.network.index)?;
                         } else if was_enabled {
@@ -716,7 +721,7 @@ where
                         store.save(&vm)
                     }
                 }
-            });
+            })();
 
             match outcome {
                 Ok(()) => {

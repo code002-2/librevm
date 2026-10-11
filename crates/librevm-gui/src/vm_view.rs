@@ -463,6 +463,9 @@ impl VmView {
             settings_button.connect_clicked(move |_| {
                 let Some(name) = shared.current.borrow().clone() else { return };
                 let store = shared.store.clone();
+                // The refresh is left to `on_changed`, which the window owns: the pane, the
+                // sidebar and the selection all have to agree afterwards, and that is
+                // something the parent knows about and this widget does not.
                 let notify = notify.clone();
                 crate::editor::present_editor(store, &name, window_of().as_ref(), move || {
                     notify();
