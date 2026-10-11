@@ -643,6 +643,24 @@ fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
         }
 
         NetCommand::Teardown => {
+            // Refuse while a machine is still attached to the tap.
+            //
+            // Removing it under a running guest leaves the host with no route to an address
+            // the guest still believes it owns, and the symptom is "no route to host" from
+            // ssh with nothing on the host side to explain it: no tap, no route, and an ARP
+            // entry pointing at the Wi-Fi interface because that is where the subnet lives.
+            let live: Vec<String> = store
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|n| vm::state(store, n) != State::Stopped)
+                .collect();
+            if !live.is_empty() {
+                bail!(
+                    "{} is still running and using the tap; stop it first",
+                    live.join(", ")
+                );
+            }
             librevm_core::net::teardown()?;
             println!("the tap is gone");
             Ok(())

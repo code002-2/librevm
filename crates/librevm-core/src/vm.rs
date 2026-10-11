@@ -40,18 +40,39 @@ impl std::fmt::Display for State {
 /// started as another. Treating that as "dead" makes a perfectly healthy machine
 /// look stale, and the caller then clears its pid file and tries to start a second
 /// copy on top of the first.
+/// Is this pid a live process?
+///
+/// A zombie counts as dead. `kill(pid, 0)` succeeds for a process that has exited but whose
+/// parent has not reaped it yet, and `/proc/<pid>` still exists for one too -- so a crosvm
+/// that was killed and is waiting to be collected looks alive by both of the obvious checks.
+/// That made `stop` report "still alive after SIGKILL" for a process that was already gone,
+/// and left the pid file behind, which then made every later `status` say `running`.
 pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    // signal 0 checks for existence without delivering anything
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
     }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
+    !is_zombie(pid)
+}
+
+/// Has this process exited but not been reaped?
+///
+/// Read from `/proc/<pid>/stat`, whose second field is the state. It is in parentheses and
+/// may itself contain spaces, so the state is the first field after the last `)`.
+fn is_zombie(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        // No stat file at all: it went away between the two calls, which means dead.
+        return true;
+    };
+    match stat.rsplit_once(')') {
+        Some((_, rest)) => rest.split_whitespace().next() == Some("Z"),
+        None => false,
+    }
 }
 
 /// Read the recorded pid for a VM, if any.
@@ -212,12 +233,23 @@ pub fn stop(store: &Store, name: &str, grace_ms: u64) -> Result<()> {
         }
     }
 
+    // The bookkeeping is cleared only once the process is actually gone.
+    //
+    // Removing the pid file first and *then* reporting failure left the worst of both: the
+    // machine was still running, but `state` read the file back, found nothing, and said
+    // `stopped`. An operator who believed that would go on to tear the network down, leaving
+    // a live guest on an address the host no longer had a route to -- which reads as
+    // "no route to host" from ssh, with nothing on the host explaining why. Keeping the
+    // file means the next `stop` still knows which pid to kill.
+    if pid_alive(pid) {
+        bail!(
+            "{name} (pid {pid}) is still alive after SIGKILL; the pid file is left in place \
+             so another stop can try again"
+        );
+    }
+
     let _ = std::fs::remove_file(store.pid_file(name));
     let _ = std::fs::remove_file(store.console_socket(name));
-
-    if pid_alive(pid) {
-        bail!("{name} (pid {pid}) is still alive after SIGKILL");
-    }
 
     log::info!("{name} stopped");
     Ok(())
