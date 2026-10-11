@@ -16,6 +16,12 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 libc.workspace = true
+serde_json.workspace = true
+
+# The window runs as whoever opened it, so anything privileged goes over the system
+# bus to librevm-daemon. Blocking rather than async: GTK is a callback-shaped,
+# single-threaded toolkit and these calls are short.
+zbus = { version = "4", default-features = false, features = ["blocking"] }
 
 # GTK 4.18 and libadwaita 1.7 are what the target ships. These crate versions are
 # the newest that still build on Rust 1.88; gtk4 0.11 needs 1.92.

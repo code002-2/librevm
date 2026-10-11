@@ -1,0 +1,251 @@
+//! A client for the daemon.
+//!
+//! The window runs as whoever opened it. Everything that touches the store or starts a
+//! machine belongs to root, so those calls go over the system bus to `librevm-daemon`
+//! instead of being done here.
+//!
+//! Blocking rather than async on purpose: GTK is a single-threaded, callback-shaped
+//! toolkit, and these calls are short. A `blocking::Connection` keeps the client free of
+//! an executor and keeps the call sites looking like ordinary function calls.
+//!
+//! Falling back is a real path, not a formality. Running the window as root is still
+//! allowed, and so is running it on a machine where the daemon is not installed; in
+//! both cases the direct calls in `librevm-core` work and are used instead.
+
+use anyhow::{bail, Context, Result};
+use serde_json::Value;
+use zbus::blocking::Connection;
+use zbus::zvariant::Value as ZValue;
+
+const BUS_NAME: &str = "org.librevm.Daemon1";
+const OBJECT_PATH: &str = "/org/librevm/Daemon1";
+const INTERFACE: &str = "org.librevm.Daemon1";
+
+/// A connection to the daemon, if there is one and we are allowed to use it.
+pub struct Client {
+    conn: Connection,
+}
+
+impl Client {
+    /// Connect to the system bus and check that the daemon is actually there.
+    ///
+    /// Returns `None` rather than an error for every reason a client might not be
+    /// usable: no system bus, no daemon, or a policy that refuses us. In each case the
+    /// caller falls back to doing the work itself, so a failure here is not something
+    /// the operator needs to see.
+    pub fn connect() -> Option<Client> {
+        let conn = Connection::system().ok()?;
+
+        // Asking for the name's owner is the cheapest liveness check: if nobody owns
+        // it, the proxy would fail on the first call with a less helpful message.
+        let owned: bool = conn
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "NameHasOwner",
+                &(BUS_NAME),
+            )
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<bool>().ok())
+            .unwrap_or(false);
+
+        if !owned {
+            log::debug!("the daemon is not on the bus");
+            return None;
+        }
+        Some(Client { conn })
+    }
+
+    fn call(&self, method: &str, args: &[ZValue<'_>]) -> Result<Value> {
+        let reply = self
+            .conn
+            .call_method(Some(BUS_NAME), OBJECT_PATH, Some(INTERFACE), method, args)
+            .with_context(|| format!("calling {method}"))?;
+
+        let text: String = reply
+            .body()
+            .deserialize()
+            .with_context(|| format!("{method} did not answer with a string"))?;
+
+        let value: Value =
+            serde_json::from_str(&text).with_context(|| format!("{method} answered {text:?}"))?;
+
+        // Every method reports failure as an `error` field in the document rather than
+        // a D-Bus error, so that the message survives the trip intact.
+        if let Some(message) = value.get("error").and_then(|v| v.as_str()) {
+            bail!("{message}");
+        }
+        Ok(value)
+    }
+
+    /// The `ok`/`message` shape the acting methods return.
+    fn acted(&self, method: &str, args: &[ZValue<'_>]) -> Result<String> {
+        let value = self.call(method, args)?;
+        Ok(value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("done")
+            .to_string())
+    }
+
+    pub fn list_machines(&self) -> Result<Vec<Value>> {
+        let value = self.call("ListMachines", &[])?;
+        value
+            .as_array()
+            .cloned()
+            .context("ListMachines did not answer with an array")
+    }
+
+    pub fn machine(&self, name: &str) -> Result<Value> {
+        self.call("Machine", &[ZValue::from(name)])
+    }
+
+    pub fn host_info(&self) -> Result<Value> {
+        self.call("HostInfo", &[])
+    }
+
+    pub fn plan(&self, name: &str) -> Result<Value> {
+        self.call("Plan", &[ZValue::from(name)])
+    }
+
+    pub fn start_machine(&self, name: &str) -> Result<String> {
+        self.acted("StartMachine", &[ZValue::from(name)])
+    }
+
+    pub fn stop_machine(&self, name: &str, grace_secs: u32) -> Result<String> {
+        self.acted(
+            "StopMachine",
+            &[ZValue::from(name), ZValue::from(grace_secs)],
+        )
+    }
+
+    pub fn create_machine(&self, definition: &str) -> Result<String> {
+        self.acted("CreateMachine", &[ZValue::from(definition)])
+    }
+
+    pub fn delete_machine(&self, name: &str) -> Result<String> {
+        self.acted("DeleteMachine", &[ZValue::from(name)])
+    }
+
+    /// The last `max_bytes` of console output.
+    pub fn console_tail(&self, name: &str, max_bytes: u32) -> Result<Vec<u8>> {
+        let reply = self
+            .conn
+            .call_method(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                Some(INTERFACE),
+                "ConsoleTail",
+                &(name, max_bytes),
+            )
+            .with_context(|| format!("asking for {name}'s console"))?;
+        reply
+            .body()
+            .deserialize::<Vec<u8>>()
+            .context("ConsoleTail did not answer with bytes")
+    }
+
+    pub fn attach_disk(
+        &self,
+        name: &str,
+        path: &str,
+        readonly: bool,
+        root: bool,
+        label: &str,
+    ) -> Result<String> {
+        self.acted(
+            "AttachDisk",
+            &[
+                ZValue::from(name),
+                ZValue::from(path),
+                ZValue::from(readonly),
+                ZValue::from(root),
+                ZValue::from(label),
+            ],
+        )
+    }
+
+    pub fn detach_disk(&self, name: &str, path: &str) -> Result<String> {
+        self.acted(
+            "DetachDisk",
+            &[ZValue::from(name), ZValue::from(path)],
+        )
+    }
+
+    pub fn add_share(&self, name: &str, path: &str, tag: &str, readonly: bool) -> Result<String> {
+        self.acted(
+            "AddShare",
+            &[
+                ZValue::from(name),
+                ZValue::from(path),
+                ZValue::from(tag),
+                ZValue::from(readonly),
+            ],
+        )
+    }
+
+    pub fn remove_share(&self, name: &str, tag: &str) -> Result<String> {
+        self.acted("RemoveShare", &[ZValue::from(name), ZValue::from(tag)])
+    }
+
+    pub fn create_disk(
+        &self,
+        path: &str,
+        size: &str,
+        format: &str,
+        attach_to: &str,
+    ) -> Result<String> {
+        self.acted(
+            "CreateDisk",
+            &[
+                ZValue::from(path),
+                ZValue::from(size),
+                ZValue::from(format),
+                ZValue::from(attach_to),
+            ],
+        )
+    }
+
+    pub fn list_disks(&self) -> Result<Vec<Value>> {
+        let value = self.call("ListDisks", &[])?;
+        value
+            .as_array()
+            .cloned()
+            .context("ListDisks did not answer with an array")
+    }
+
+    /// Read a field out of one of the JSON documents.
+    pub fn field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+        value.get(key)
+    }
+}
+
+/// The daemon's view of a machine, and whether one is reachable.
+///
+/// The window asks once at startup and keeps the answer. A daemon that appears later
+/// would need a reconnect; a window that is already running can simply be reopened,
+/// and pretending otherwise would mean polling the bus on every refresh.
+#[derive(Default)]
+pub struct Bridge {
+    client: Option<Client>,
+}
+
+impl Bridge {
+    pub fn new() -> Self {
+        let client = Client::connect();
+        match &client {
+            Some(_) => log::info!("talking to the daemon over the system bus"),
+            None => log::info!("no daemon on the bus; managing the store directly"),
+        }
+        Bridge { client }
+    }
+
+    pub fn connected(&self) -> bool {
+        self.client.is_some()
+    }
+
+    pub fn client(&self) -> Option<&Client> {
+        self.client.as_ref()
+    }
+}

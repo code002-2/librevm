@@ -25,6 +25,10 @@ struct Shared {
     /// Called when the operator asks for the console, so the window can switch
     /// its stack to the console pane.
     on_console: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    /// The daemon, when there is one. Reading the store is done directly -- it is
+    /// group-readable -- but everything that writes or starts a machine goes through
+    /// here, so the window never needs to be root.
+    bridge: Rc<crate::daemon::Bridge>,
 }
 
 pub struct VmView {
@@ -171,6 +175,7 @@ impl VmView {
             current: Rc::new(RefCell::new(None)),
             on_changed: Rc::new(RefCell::new(None)),
             on_console: Rc::new(RefCell::new(None)),
+            bridge: Rc::new(crate::daemon::Bridge::new()),
         };
 
         // The disks panel edits the same definition the rest of the pane shows, so
@@ -360,12 +365,23 @@ impl VmView {
 
                 // Start under a hub: crosvm's console is a client of a socket that
                 // has to exist first, and this process cannot hold it.
-                match std::env::current_exe()
-                    .context("finding our own path")
-                    .and_then(|exe| librevm_core::hub::spawn(&shared.store, &name, &exe))
-                {
-                    Ok(pid) => {
-                        log::info!("{name} started (pid {pid})");
+                //
+                // Through the daemon when there is one, because the store belongs to
+                // root and so does /dev/gunyah. Doing it here is the fallback for a
+                // window that was started as root, or on a machine without the daemon.
+                let started: anyhow::Result<String> = match shared.bridge.client() {
+                    Some(client) => client
+                        .start_machine(&name)
+                        .map(|m| format!("{name}: {m}")),
+                    None => std::env::current_exe()
+                        .context("finding our own path")
+                        .and_then(|exe| librevm_core::hub::spawn(&shared.store, &name, &exe))
+                        .map(|pid| format!("{name} started (pid {pid})")),
+                };
+
+                match started {
+                    Ok(what) => {
+                        log::info!("{what}");
                         // Starting a machine is almost always followed by wanting
                         // to use it.
                         if let Some(f) = shared.on_console.borrow().as_ref() {
@@ -406,7 +422,11 @@ impl VmView {
             let window_of = window_of.clone();
             self.stop_button.connect_clicked(move |_| {
                 let Some(name) = shared.current.borrow().clone() else { return };
-                if let Err(e) = vm::stop(&shared.store, &name, 5000) {
+                let stopped: anyhow::Result<String> = match shared.bridge.client() {
+                    Some(client) => client.stop_machine(&name, 5),
+                    None => vm::stop(&shared.store, &name, 5000).map(|_| format!("stopped {name}")),
+                };
+                if let Err(e) = stopped {
                     alert(
                         window_of(),
                         i18n::tr(i18n::Key::CouldNotStop),
@@ -473,12 +493,25 @@ impl VmView {
                 d.set_close_response("cancel");
 
                 let store = shared.store.clone();
+                let bridge = shared.bridge.clone();
                 let name = name.clone();
                 let notify = notify.clone();
                 d.connect_response(None, move |_, resp| {
                     if resp == "delete" {
-                        match store.remove(&name) {
-                            Ok(()) => log::info!("deleted {name}"),
+                        // Removing the store directory is privileged, so it goes to the
+                        // daemon when there is one; the daemon also stops the machine
+                        // first, so a hub cannot outlive the definition it serves.
+                        let outcome: anyhow::Result<String> = match bridge.client() {
+                            Some(client) => client.delete_machine(&name),
+                            None => {
+                                if vm::state(&store, &name) != vm::State::Stopped {
+                                    let _ = vm::stop(&store, &name, 5000);
+                                }
+                                store.remove(&name).map(|_| format!("deleted {name}"))
+                            }
+                        };
+                        match outcome {
+                            Ok(what) => log::info!("{what}"),
                             Err(e) => log::error!("could not delete {name}: {e:#}"),
                         }
                         notify();
