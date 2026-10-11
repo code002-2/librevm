@@ -186,6 +186,50 @@ pub struct SharedDirConfig {
     pub readonly: bool,
 }
 
+/// Guest networking.
+///
+/// This is not NAT. The kernel has no `nf_nat`, so the guest is given an address on the
+/// host's own subnet instead and the host forwards; see `net.rs` for why that works and
+/// what it costs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetConfig {
+    /// Attach a network device.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The tap interface, on the host side.
+    #[serde(default = "default_tap")]
+    pub tap: String,
+
+    /// Which guest address to use, as the last octet of the host's subnet. Two machines
+    /// on one host need different values.
+    #[serde(default)]
+    pub index: u8,
+
+    /// The interface name the guest should configure.
+    #[serde(default = "default_guest_iface")]
+    pub guest_interface: String,
+}
+
+fn default_tap() -> String {
+    crate::net::TAP_NAME.to_string()
+}
+
+fn default_guest_iface() -> String {
+    "eth0".to_string()
+}
+
+impl Default for NetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tap: default_tap(),
+            index: 0,
+            guest_interface: default_guest_iface(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
     pub name: String,
@@ -217,9 +261,18 @@ pub struct VmConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_dirs: Vec<SharedDirConfig>,
 
+    /// Guest networking.
+    #[serde(default, skip_serializing_if = "is_default_net")]
+    pub network: NetConfig,
+
     /// Free-form description, purely for the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Leave the section out of a definition that does not use it.
+fn is_default_net(n: &NetConfig) -> bool {
+    !n.enabled && n.index == 0
 }
 
 fn default_cpus() -> u32 {

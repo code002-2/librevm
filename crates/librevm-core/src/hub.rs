@@ -269,6 +269,24 @@ pub fn run(store: &Store, name: &str) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
+    // Bring the host side of the guest's network up before crosvm starts, because the tap
+    // has to exist and be addressed before crosvm opens it by name.
+    if config.network.enabled {
+        match crate::net::setup(config.network.index) {
+            Ok(guest) => {
+                log::info!(
+                    "{name}: tap {} up, guest should use {}/{} via {}",
+                    config.network.tap,
+                    guest.address,
+                    guest.prefix,
+                    guest.gateway
+                );
+            }
+            // A machine without a network is still worth starting, so this is not fatal.
+            Err(e) => log::warn!("{name}: could not set up the guest network: {e:#}"),
+        }
+    }
+
     let mut child = Command::new(&plan.argv[0])
         .args(&plan.argv[1..])
         .stdin(Stdio::null())

@@ -739,6 +739,7 @@ pub fn present_create_dialog<F: Fn() + 'static>(
                 console: ConsoleConfig { socket: None, log: None },
                 disks: Vec::new(),
                 shared_dirs: Vec::new(),
+                network: Default::default(),
                 description: None,
             };
 

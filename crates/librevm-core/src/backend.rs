@@ -368,6 +368,14 @@ pub fn build_command(
         ));
     }
 
+    // Networking. The tap is created and addressed by `net::setup` before crosvm starts,
+    // so all crosvm needs is its name. No mac: the guest picks a random one, which keeps
+    // two machines on the host from colliding.
+    if vm.network.enabled {
+        args.push("--net".to_string());
+        args.push(format!("tap-name={}", vm.network.tap));
+    }
+
     // crosvm takes the kernel as a positional argument.
     args.push(vm.boot.kernel.display().to_string());
 

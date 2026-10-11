@@ -44,9 +44,32 @@ librevm 的目标是：**把「在这台机器上开一个虚拟机」变成点�
 | 控制台里的终端仿真（颜色、光标、清屏） | ✅ 可用 |
 | 磁盘镜像管理（创建 / 扩容 / 克隆 / 检查） | ✅ 可用 |
 | 磁盘接入客户机（virtio-blk） | ✅ 可用 |
-| 客户机网络（virtio-net） | ✅ 可用 |
+| 客户机网络（virtio-net，转发而非 NAT） | ✅ 可用 |
 | 共享目录（virtio-fs） | ✅ 可用 |
 | D-Bus daemon（GUI 以普通用户运行） | ✅ 可用 |
+
+### 客户机网络
+
+**不是 NAT，是转发。** 这台内核没有 `nf_nat`，`iptables` 和 `nftables` 都编不出来
+（前者被 `!PREEMPT_RT` 挡住，后者缺一个编进内核本体的 `nfnetlink`），而 Wi-Fi
+接口又拒绝加入网桥。用户态的几种做法也都不合适：`slirp4netns` 是为无根容器写的，
+一个 tap 只有一个用户端；`passt` 的 vhost-user 模式则要求共享内存，而受保护虚拟
+机的内存是借出的。
+
+所以干脆不翻译：客户机拿到一个**宿主同网段的地址**，宿主打开转发。它的地址在那个
+网段上是合法的，路由器会直接回应它，不需要任何地址转换。
+
+```sh
+sudo librevm net enable demo     # 打开，并把宿主侧配好
+sudo librevm net status
+```
+
+有三个细节决定成败，见 [docs/guest-networking.md](docs/guest-networking.md)：
+tap 上要用 `/32`（用 `/24` 会装进第二条子网路由，宿主自己先失联）、
+`proxy_arp` 要在**两个**接口上都开、`arp_ignore` 必须是 0。
+
+实测：客户机 ping 通网关、ping 通公网、解析得了域名，并从镜像站下载了 138 KB
+的真实文件。
 
 ### virtio 在 Gunyah 上可以用
 

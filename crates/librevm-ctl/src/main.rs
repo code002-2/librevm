@@ -142,6 +142,12 @@ enum Command {
         action: DiskCommand,
     },
 
+    /// Guest networking.
+    Net {
+        #[command(subcommand)]
+        action: NetCommand,
+    },
+
     /// Share a directory with a VM.
     Share {
         #[command(subcommand)]
@@ -246,8 +252,7 @@ enum DiskCommand {
 }
 
 #[derive(Subcommand, Debug)]
-enum ShareCommand {
-    /// Share a directory with a VM.
+enum ShareCommand {    /// Share a directory with a VM.
     Add {
         /// The VM.
         name: String,
@@ -275,6 +280,35 @@ enum ShareCommand {
 
     /// List what a VM has shared.
     List { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum NetCommand {
+    /// Turn networking on for a VM and set the host side up now.
+    Enable {
+        /// The VM.
+        name: String,
+
+        /// Which guest address to use, as the last octet of the host's subnet. Two
+        /// machines on one host need different values.
+        #[arg(long, default_value = "0")]
+        index: u8,
+    },
+
+    /// Turn networking off.
+    Disable { name: String },
+
+    /// Set the host side up without starting a machine, and say what the guest should use.
+    Setup {
+        #[arg(long, default_value = "0")]
+        index: u8,
+    },
+
+    /// Take the host side down.
+    Teardown,
+
+    /// Report whether the tap exists and what it is addressed.
+    Status,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -383,9 +417,95 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
         Command::Console { name } => cmd_console(store, name),
         Command::Delete { name, force } => cmd_delete(store, name, *force),
         Command::Disk { action } => cmd_disk(store, action),
+        Command::Net { action } => cmd_net(store, action),
         Command::Share { action } => cmd_share(store, action),
         Command::Hub { name } => hub::run(store, name),
     }
+}
+
+// -- networking ---------------------------------------------------------------
+
+fn cmd_net(store: &Store, action: &NetCommand) -> Result<()> {
+    match action {
+        NetCommand::Enable { name, index } => {
+            let mut vm = store.load(name)?;
+            vm.network.enabled = true;
+            vm.network.index = *index;
+            store.save(&vm)?;
+
+            // Set the host side up now as well, so a mistake is reported here rather than
+            // going to a log file when the machine starts.
+            match librevm_core::net::setup(*index) {
+                Ok(guest) => {
+                    println!("networking enabled for {name}");
+                    println!();
+                    println!("The host is ready. In the guest:");
+                    print!("{}", indent(&guest.script()));
+                    println!();
+                    println!("The guest needs a DHCP client or that script at boot; the");
+                    println!("address is a static one on this network, not a lease.");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("librevm: saved the setting, but the host side did not come up:");
+                    eprintln!("  {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        NetCommand::Disable { name } => {
+            let mut vm = store.load(name)?;
+            vm.network.enabled = false;
+            store.save(&vm)?;
+            librevm_core::net::teardown().ok();
+            println!("networking disabled for {name}");
+            Ok(())
+        }
+
+        NetCommand::Setup { index } => {
+            let guest = librevm_core::net::setup(*index)?;
+            println!("the tap is up");
+            println!();
+            println!("In the guest:");
+            print!("{}", indent(&guest.script()));
+            Ok(())
+        }
+
+        NetCommand::Teardown => {
+            librevm_core::net::teardown()?;
+            println!("the tap is gone");
+            Ok(())
+        }
+
+        NetCommand::Status => {
+            println!("tap      : {}", librevm_core::net::TAP_NAME);
+            println!(
+                "present  : {}",
+                if librevm_core::net::is_up() { "yes" } else { "no" }
+            );
+            let name = librevm_core::net::TAP_NAME;
+            for (label, path) in [
+                ("address", format!("/sys/class/net/{name}/address")),
+                ("mtu", format!("/sys/class/net/{name}/mtu")),
+            ] {
+                if let Ok(v) = std::fs::read_to_string(&path) {
+                    println!("{label:<9}: {}", v.trim());
+                }
+            }
+            println!();
+            println!("Note: this is forwarding, not NAT. The guest takes an address on the");
+            println!("host's own subnet, which is what removes the need for translation --");
+            println!("and this kernel has no nf_nat to translate with in any case.");
+            Ok(())
+        }
+    }
+}
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| format!("    {l}\n"))
+        .collect::<String>()
 }
 
 // -- disks ------------------------------------------------------------------
@@ -779,6 +899,7 @@ fn cmd_create(
         },
         disks: Vec::new(),
         shared_dirs: Vec::new(),
+        network: Default::default(),
         description,
     };
 
