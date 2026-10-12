@@ -323,9 +323,35 @@ pub fn run(store: &Store, name: &str) -> Result<()> {
         .with_context(|| format!("spawning {}", plan.argv[0]))?;
 
     let pid = child.id() as i32;
-    std::fs::write(store.pid_file(name), format!("{pid}\n"))
-        .with_context(|| format!("writing {}", store.pid_file(name).display()))?;
+    let pid_file = store.pid_file(name);
+    std::fs::write(&pid_file, format!("{pid}\n"))
+        .with_context(|| format!("writing {}", pid_file.display()))?;
     log::info!("{name}: crosvm pid {pid}");
+
+    // Keep the pid file there for as long as crosvm lives.
+    //
+    // Writing it once at startup makes the whole of `status` depend on a single file staying
+    // put, and files do not: it has been observed missing while crosvm was plainly running,
+    // which reads as a stopped machine. The hub is crosvm's parent, so it knows for certain
+    // whether the process is alive, and it can put the file back when something removes it.
+    {
+        let pid_file = pid_file.clone();
+        let machine = name.to_string();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                // The hub exits when crosvm does, which stops this thread with it, so there
+                // is no need to test for exit here.
+                let present = std::fs::read_to_string(&pid_file)
+                    .map(|t| t.trim().parse::<i32>().ok() == Some(pid))
+                    .unwrap_or(false);
+                if !present {
+                    log::warn!("{machine}: the pid file went missing; writing {pid} again");
+                    let _ = std::fs::write(&pid_file, format!("{pid}\n"));
+                }
+            }
+        });
+    }
 
     // The touchscreen, when the machine asks for it and the host has one.
     //

@@ -356,6 +356,65 @@ console text is drawn at 8x16 pixels a character. On a window of that size the b
 readable and the shell prompt is usable; a larger font would need `fbcon=font:` on the
 command line.
 
+## Boot, and where the state lives
+
+Two things that were found while making the boot look like a real machine's.
+
+### The guest has to run an init system
+
+The boot initramfs used to `switch_root` into a shell loop:
+
+```sh
+exec switch_root /newroot /bin/sh -c '
+    ...
+    while true; do printf "alpine:~# "; read -r line; eval "$line"; done'
+```
+
+That made the shell the whole of userspace. `pid 1` was `sh`, nothing ran services, and a
+package that installs an OpenRC unit expecting it to start at boot was simply never started —
+which is why the desktop did not appear on its own however the hook was written. `/sbin/init`
+was present the whole time; nothing called it. It now does:
+
+```
+$ cat /proc/1/comm
+init
+$ rc-status --all | head
+Runlevel: default
+ networking   [ started ]
+ sshd         [ started ]
+ crond        [ started ]
+ local        [ started ]
+```
+
+`/sbin/init` is busybox init, which reads `/etc/inittab` and starts OpenRC from there. A serial
+getty is added to `inittab`, so `librevm console` gets a login prompt as well as the kernel log.
+If `/sbin/init` is ever absent the initramfs falls back to the old shell, so a broken image is
+still reachable instead of booting into silence.
+
+The handover must not start `sshd` itself any more: it is in the default runlevel, and OpenRC
+starts it, so doing both races.
+
+### The pid file
+
+`status` reads `/run/librevm/<name>.pid` — the run directory, not the machine's own directory.
+Knowing which is which matters, because looking in the wrong place makes a running machine look
+stopped.
+
+The file was written once, at startup, and that turned out not to be enough: it has been seen
+missing while `crosvm` was plainly alive, and with it gone `status` reports `stopped`. Nothing
+had removed it deliberately. The hub is crosvm's parent, so it knows for certain whether the
+process is alive, and it now keeps the file in place:
+
+```
+[10:19:28 INFO] demo: crosvm pid 103858
+[10:20:23 WARN] demo: the pid file went missing; writing 103858 again
+```
+
+Deleting the file by hand reproduces the failure and the recovery: `state stopped` immediately
+afterwards, `state running (pid 103858)` three seconds later, with the machine itself untouched
+throughout. The general rule is that a single write by a process that then goes away leaves a
+file nothing is responsible for; whoever owns the process should own the file too.
+
 ## Naming the machine
 
 A guest reports the device tree crosvm generates, so `fastfetch` says `CPU: dummy-virt`, and

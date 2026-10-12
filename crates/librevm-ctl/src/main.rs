@@ -792,10 +792,26 @@ fn cmd_desktop(store: &Store, action: &DesktopCommand) -> Result<()> {
             )
             .context("installing the boot hook")?;
 
+            // The hook is inert until Alpine's `local` service is enabled, which runs
+            // /etc/local.d/*.start. Leaving that to the operator produced a machine that
+            // looked installed and came up at a console prompt, so it is done here.
+            match librevm_core::ssh::run(
+                store.root(),
+                &address,
+                "rc-update add local default 2>&1 | tail -1",
+            ) {
+                Ok(out) => {
+                    let line = out.trim();
+                    if !line.is_empty() {
+                        println!("  {line}");
+                    }
+                }
+                Err(e) => println!("  could not enable the boot service: {e:#}"),
+            }
+
             println!();
             println!("  launcher : /usr/local/bin/librevm-desktop");
-            println!("  boot hook: /etc/local.d/librevm-desktop.start");
-            println!("             (run `rc-update add local default` in the guest to use it)");
+            println!("  boot hook: /etc/local.d/librevm-desktop.start (enabled at the default runlevel)");
             println!();
             println!("start it with: librevm desktop start {name}");
             Ok(())
