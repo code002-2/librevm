@@ -226,6 +226,7 @@ pub fn build_command(
     resolved: &Detected,
     crosvm: &Path,
     console: &ConsoleSink,
+    run_dir: &Path,
 ) -> Result<Vec<String>> {
     vm.validate()?;
 
@@ -346,6 +347,21 @@ pub fn build_command(
         // and never arrives. These two flags are the whole difference.
         args.push("--display-window-keyboard".to_string());
         args.push("--display-window-mouse".to_string());
+
+        // The host's touchscreen, when asked for.
+        //
+        // The socket form rather than `--input multi-touch[path=...]`, because the latter
+        // grabs the device exclusively and the desktop is already using it. The socket is
+        // served by [`crate::touch`], started alongside the machine.
+        if vm.gpu.touch {
+            let (width, height) = crate::touch::fallback_size(vm);
+            let socket = crate::touch::socket_path(run_dir, &vm.name);
+            args.push("--multi-touch".to_string());
+            args.push(format!(
+                "path={},width={width},height={height},name=librevm touch",
+                socket.display()
+            ));
+        }
     }
 
     // Kernel command line. Force the console parameters the emulated UART needs,
@@ -624,6 +640,12 @@ mod tests {
             &det(),
             Path::new("/usr/bin/crosvm"),
             &ConsoleSink::Stdout,
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
         )
         .unwrap();
         let joined = args.join(" ");
@@ -642,7 +664,7 @@ mod tests {
     fn unprotected_omits_swiotlb() {
         let mut v = vm();
         v.hypervisor.protection = Protection::None;
-        let args = build_command(&v, &det(), Path::new("/c"), &ConsoleSink::Stdout).unwrap();
+        let args = build_command(&v, &det(), Path::new("/c"), &ConsoleSink::Stdout, Path::new("/run/librevm")).unwrap();
         assert!(!args.join(" ").contains("--swiotlb"));
     }
 
@@ -651,7 +673,7 @@ mod tests {
         let mut v = vm();
         v.hypervisor.protection = Protection::WithFirmware;
         v.hypervisor.firmware = Some(PathBuf::from("/fw.bin"));
-        let args = build_command(&v, &det(), Path::new("/c"), &ConsoleSink::Stdout).unwrap();
+        let args = build_command(&v, &det(), Path::new("/c"), &ConsoleSink::Stdout, Path::new("/run/librevm")).unwrap();
         let i = args
             .iter()
             .position(|a| a == "--protected-vm-with-firmware")
@@ -680,6 +702,12 @@ mod tests {
             &det(),
             Path::new("/c"),
             &ConsoleSink::UnixStream(PathBuf::from("/tmp/nope/x.sock")),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
+            Path::new("/run/librevm"),
         )
         .unwrap();
         let joined = args.join(" ");

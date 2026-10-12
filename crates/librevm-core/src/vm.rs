@@ -122,7 +122,7 @@ pub fn plan(store: &Store, vm: &VmConfig, socket_console: bool) -> Result<Plan> 
     };
     let console_is_socket = matches!(sink, ConsoleSink::UnixStream(_));
 
-    let argv = backend::build_command(vm, &resolved, &crosvm, &sink)?;
+    let argv = backend::build_command(vm, &resolved, &crosvm, &sink, store.run_dir())?;
 
     Ok(Plan { argv, hypervisor: resolved, console_is_socket })
 }

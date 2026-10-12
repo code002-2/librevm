@@ -10,8 +10,9 @@
 //! and no port mapping.
 
 use anyhow::{bail, Context, Result};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The keypair in the store.
 pub const KEY_NAME: &str = "librevm_ed25519";
@@ -189,6 +190,50 @@ pub fn connect(store_root: &Path, address: &str, command: Option<&str>) -> Resul
         Ok(())
     }
 }
+
+/// Write a file into a guest, and give it a mode.
+///
+/// The content goes over stdin rather than through a shell command, so nothing in it has to
+/// survive being quoted. That matters for a script: a launcher with `$`, backticks or quotes
+/// in it is exactly the thing that gets mangled when it is passed as an argument.
+pub fn write_file(
+    store_root: &Path,
+    address: &str,
+    remote: &str,
+    contents: &str,
+    mode: u32,
+) -> Result<()> {
+    forget_host_key(store_root, address);
+    let mut args = connection_args(store_root, address);
+    args.push(format!(
+        // `cat` reads stdin and writes it where asked; the chmod is a second command on the
+        // same connection so it cannot be skipped by a partial write.
+        "mkdir -p \"$(dirname {remote})\" && cat > {remote} && chmod {mode:o} {remote}"
+    ));
+
+    let mut child = Command::new("ssh")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running ssh")?;
+    child
+        .stdin
+        .as_mut()
+        .context("ssh gave no stdin")?
+        .write_all(contents.as_bytes())
+        .context("writing the file's contents")?;
+    let out = child.wait_with_output().context("waiting for ssh")?;
+    if !out.status.success() {
+        bail!(
+            "writing {remote} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 
 /// Copy a file to a guest.
 pub fn copy(store_root: &Path, address: &str, local: &Path, remote: &str) -> Result<()> {

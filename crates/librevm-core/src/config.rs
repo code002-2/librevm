@@ -513,6 +513,30 @@ pub struct GpuConfig {
     /// which is what an operator wants almost every time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wayland_sock: Option<PathBuf>,
+
+    /// Pass the host's touchscreen through, when it has one.
+    ///
+    /// Not done by giving crosvm the event node: that path takes the device exclusively with
+    /// EVIOCGRAB, and the desktop already holds the panel. librevm reads the panel itself and
+    /// feeds crosvm over a socket instead, which needs no exclusive access. See `touch.rs`.
+    #[serde(default)]
+    pub touch: bool,
+
+    /// The part of the host's panel the window covers, as `[x, y, width, height]` in the
+    /// panel's own units.
+    ///
+    /// A window is not the screen. Reading the panel and mapping it onto the guest's display
+    /// assumes the two are the same rectangle, and they are not: on this device the panel is
+    /// 3199 by 2135 while the window is a 2080 by 1400 rectangle at the origin, so a touch
+    /// two thirds of the way across the window lands three quarters of the way across the
+    /// screen. Everything outside the window has no corresponding place in the guest and is
+    /// dropped.
+    ///
+    /// `librevm desktop touch-area` reads the window's geometry and prints the value.
+    /// Left unset, the whole panel is assumed, which is right only when the window covers
+    /// the screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_area: Option<[i32; 4]>,
 }
 
 fn default_gpu_backend() -> String {
@@ -527,6 +551,8 @@ impl Default for GpuConfig {
             width: 0,
             height: 0,
             wayland_sock: None,
+            touch: false,
+            touch_area: None,
         }
     }
 }

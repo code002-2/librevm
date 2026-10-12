@@ -164,6 +164,141 @@ buffer or a blob, so that is where the next attempt should start — the device 
 `+resource_blob +host_visible`, and `VIRTIO_GPU_BLOB_MEM_GUEST` is the path that avoids
 needing a contiguous region of the host's own.
 
+## A desktop in the guest
+
+`librevm desktop install <name>` puts XFCE on a machine, and `desktop start` runs it. The
+window then shows the desktop, drawn by the guest and presented by crosvm.
+
+```
+librevm desktop install demo     # a few hundred MiB from the distribution's mirrors
+librevm desktop start demo
+librevm desktop status demo
+librevm desktop stop demo
+```
+
+The machine needs `[gpu] enabled = true` and a kernel with the graphics drivers built in; the
+command says so if either is missing.
+
+### The three things that have to be right
+
+**One: no `xorg.conf`.** This is the counter-intuitive one. A configuration that names a
+driver makes X treat the GPU as a secondary device:
+
+```
+with a hand-written xorg.conf:   (II) modeset(G0): using drv /dev/dri/card0
+                                 (EE) No devices detected.
+with no configuration at all:    (II) modeset(0): using drv /dev/dri/card0
+                                 ... and it works
+```
+
+`modeset(G0)` is the "G" for a GPU that is not the primary, and X then finds no screens at
+all. Left to probe, it picks `modeset(0)`.
+
+**Two: `xf86-video-fbdev` is not the answer.** The plan was to have X write to `/dev/fb0` and
+so avoid the DRM dumb buffers that cannot be allocated here. It loads, and then:
+
+```
+(II) Loading /usr/lib/xorg/modules/drivers/fbdev_drv.so
+(II) FBDEV: driver for framebuffer: fbdev
+(II) Loading sub module "fbdevhw"
+(EE) No devices detected.
+```
+
+X 21.1's fbdev driver only claims PCI and platform framebuffers, and this one is a DRM client
+device, so it matches nothing. The modesetting driver takes the DRM node directly and is what
+actually runs — and, contrary to the expectation, it does not need a dumb buffer to start.
+
+**Three: udev has to be running before X.** X enumerates input through udev. A bare Alpine
+rootfs ships mdev, so the virtio touchscreen and keyboard exist in the kernel and are
+invisible to X, which looks exactly like the hypervisor not providing them:
+
+```
+with mdev only, X starts with:   ⎡ Virtual core pointer
+                                 ⎜   ↳ Virtual core XTEST pointer
+with eudev running first:        ⎜   ↳ Virtual core XTEST pointer
+                                 ⎜   ↳ Crosvm Virtio Multitouch Touchscreen
+```
+
+So the launcher starts `udevd`, waits for `/run/udev/data`, runs `udevadm trigger --action=add`
+and `udevadm settle`, and only then starts X. The order matters, which is why the launcher is
+a file with comments in it rather than a line of shell in the installer.
+
+## Input
+
+crosvm forwards nothing from the display window unless asked, so a desktop without
+`--display-window-keyboard` and `--display-window-mouse` is a picture: visible and completely
+unusable. Both are emitted whenever a GPU is enabled.
+
+Those two flags also make crosvm create a `Crosvm Virtio Multitouch Touchscreen` in the guest.
+It appears in X and is bound by libinput, but delivers nothing — crosvm's window does not
+appear to listen for `wl_touch`, and GNOME does not synthesise pointer events from a
+touchscreen unless asked to. The device is present and silent.
+
+### The forwarder
+
+`[gpu] touch = true` makes librevm read the panel itself and feed crosvm over a socket:
+
+```
+librevm reads /dev/input/event4  ->  translates  ->  /run/librevm/<name>.touch.sock
+crosvm reads that socket (--multi-touch path=...)
+```
+
+The socket form exists because the direct one does not work here. `--input
+multi-touch[path=/dev/input/eventN]` opens the device with `EVIOCGRAB`, which takes it
+exclusively, and `gnome-shell` already holds the panel:
+
+```
+/dev/input/event4:   root  1      systemd
+                     root  12085  systemd-logind
+                     piano 12485  gnome-shell
+crosvm: 0: failed to open event device '/dev/input/event4'
+        1: Connection refused (os error 111)
+```
+
+A socket needs no exclusive access, and an evdev node may have any number of readers, so the
+forwarder reads the panel alongside the desktop without disturbing it.
+
+The wire format is `virtio_input_event`, 8 bytes little-endian — `u16 type, u16 code, u32
+value` — where the kernel gives `input_event`, 24 bytes with a timestamp in front. crosvm's
+source says so directly: *"it handles `virtio_input_event` instead of `input_event`
+structures"*.
+
+### Coordinates
+
+A window is not the screen, and this cost several rounds.
+
+```
+panel, from EVIOCGABS:        3199 x 2135
+screen, from DisplayConfig:   3200 x 2136
+scaling factor:               2
+window, from the a11y tree:   x=0 y=0 1040x700   (logical)
+                            = 2080x1400           (panel units)
+```
+
+Mapping the whole panel onto the guest's 1280x1024 puts a touch two thirds of the way across
+the window three quarters of the way across the screen. The forwarder now reads the panel's
+real ranges with `EVIOCGABS` rather than being told them, and takes the window's rectangle
+from `[gpu] touch_area = [x, y, w, h]` in panel units. A touch outside that rectangle is
+dropped, since it has no corresponding place in the guest.
+
+`librevm desktop touch-area <name>` reads the rectangle off the accessibility bus — the
+compositor will not list its windows to an ordinary client, but a window is an object and its
+extents are part of the tree — and prints the value to use:
+
+```
+$ librevm desktop touch-area demo
+window in logical pixels: x=0 y=0 w=1040 h=700
+scaling factor to check: `gsettings get org.gnome.desktop.interface scaling-factor`
+touch_area = [0, 0, 1040, 700]   # multiply the four numbers above by the factor
+```
+
+**Still open.** Whether the scaling factor is the right conversion between the accessibility
+tree's logical pixels and the panel's own units has not been confirmed by touching the screen:
+the arithmetic gives 2080x1400 and every piece is in place, but a touch in the corner of the
+window has not been shown to land in the corner of the screen. If it is wrong, the rectangle
+is the one number to change, and `touch_area` exists so that changing it does not need a
+rebuild.
+
 ## Naming the machine
 
 A guest reports the device tree crosvm generates, so `fastfetch` says `CPU: dummy-virt`, and

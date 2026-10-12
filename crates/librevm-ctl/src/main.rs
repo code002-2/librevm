@@ -187,9 +187,51 @@ enum Command {
         action: ShareCommand,
     },
 
+    /// Put a graphical desktop inside a machine, and start it.
+    ///
+    /// The packages come from the distribution's own mirrors, so the machine needs a working
+    /// network for the first run. Afterwards the launcher is on the machine and starts in
+    /// seconds.
+    Desktop {
+        #[command(subcommand)]
+        action: DesktopCommand,
+    },
+
     /// Internal: the per-VM console hub. Started detached by `start`.
     #[command(hide = true, name = "__hub")]
     Hub { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum DesktopCommand {
+    /// Install the desktop into a machine that is running.
+    Install {
+        /// The machine.
+        name: String,
+
+        /// Which desktop. Only XFCE is implemented.
+        #[arg(short, long, default_value = "xfce")]
+        kind: String,
+    },
+
+    /// Start the desktop in a machine that has it installed.
+    Start { name: String },
+
+    /// Stop it.
+    Stop { name: String },
+
+    /// Say whether it is installed and whether it is running.
+    Status { name: String },
+
+    /// Print the part of the host's screen the machine's window covers.
+    ///
+    /// The touch forwarder reads the whole panel, and a window is not the whole panel, so it
+    /// needs to be told the rectangle. Reading it from the accessibility bus is the only way
+    /// on a Wayland session: the compositor will not list its windows to an ordinary client,
+    /// but a window is an object and its extents are part of the tree.
+    ///
+    /// The value goes in the machine's definition as `touch_area = [x, y, w, h]`.
+    TouchArea { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -594,8 +636,309 @@ fn dispatch(cli: &Cli, store: &Store) -> Result<()> {
             command,
         } => cmd_ssh(store, action.as_ref(), name.as_deref(), command),
         Command::Share { action } => cmd_share(store, action),
+        Command::Desktop { action } => cmd_desktop(store, action),
         Command::Hub { name } => hub::run(store, name),
     }
+}
+
+// -- the desktop ---------------------------------------------------------------
+
+/// The launcher a machine runs to bring its desktop up.
+///
+/// Written into the guest rather than run over ssh each time, so that starting the desktop is
+/// one short command and so that the reasons behind each step are recorded next to them.
+const DESKTOP_LAUNCHER: &str = r#"#!/bin/sh
+# Start an X desktop on the virtio-gpu.
+#
+# Three things this has to get right, each of which cost an afternoon to find:
+#
+#   * No xorg.conf. A file that names a driver makes X treat the GPU as a secondary device --
+#     modeset(G0) rather than modeset(0) -- and then it finds no screens at all. Left to probe
+#     for itself, X picks modeset(0) and works. This is why there is no configuration here.
+#
+#   * udev has to be running. X relies on it to enumerate input devices, and a bare Alpine
+#     rootfs ships mdev instead. Without udev the virtio touchscreen and keyboard exist and
+#     are completely invisible to X, which looks exactly like the hypervisor not providing
+#     them.
+#
+#   * udev has to be told about devices that already exist, because it starts after they do.
+set -e
+export DISPLAY=:0
+export XDG_RUNTIME_DIR=/run/librevm-desktop
+mkdir -p "$XDG_RUNTIME_DIR"
+
+if ! pgrep -x udevd >/dev/null 2>&1 && command -v udevd >/dev/null 2>&1; then
+    mkdir -p /run/udev
+    udevd --daemon
+    sleep 2
+    udevadm trigger --action=add
+    udevadm settle
+fi
+
+if ! pgrep -f 'Xorg :0' >/dev/null 2>&1; then
+    rm -f /tmp/.X11-unix/X0
+    Xorg :0 vt1 -logfile /var/log/xorg.log >/tmp/xorg.out 2>&1 &
+    i=0
+    while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 60 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+fi
+
+if [ ! -e /tmp/.X11-unix/X0 ]; then
+    echo "X did not come up; see /var/log/xorg.log" >&2
+    exit 1
+fi
+
+if command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch)"
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+
+exec startxfce4
+"#;
+
+/// The boot hook, for a machine that should come up with a desktop on it.
+///
+/// Alpine runs `/etc/local.d/*.start` from its `local` service, which is off by default, so
+/// this is installed but not relied on: enabling it is the operator's call.
+const BOOT_HOOK: &str = "#!/bin/sh\n\
+                        # Start the desktop on boot, once, in the background.\n\
+                        # Enable with: rc-update add local default\n\
+                        if [ -x /usr/local/bin/librevm-desktop ]; then\n\
+                        \tsetsid nohup /usr/local/bin/librevm-desktop >/var/log/librevm-desktop.log 2>&1 &\n\
+                        fi\n";
+
+/// The packages a desktop needs, and why each is there.
+///
+/// `xf86-video-fbdev` is deliberately absent: it is the driver that would avoid the DRM dumb
+/// buffers this hypervisor cannot allocate, but X 21.1 only offers it PCI and platform
+/// framebuffers, and this one is a DRM client device, so it reports "No devices detected".
+/// The modesetting driver takes the DRM node directly and is what actually runs.
+const DESKTOP_PACKAGES: &[&str] = &[
+    // The server and the driver that works here.
+    "xorg-server",
+    // Input. libinput is the driver; udev is what lets X find the devices at all.
+    "xf86-input-libinput",
+    "libinput-udev",
+    "eudev",
+    // The desktop.
+    "xfce4",
+    "xfce4-terminal",
+    // A session bus, so the power manager and friends stop complaining. Not needed to draw.
+    "dbus",
+    "dbus-x11",
+    // Small tools that make the session work and that are worth having for diagnosis.
+    "xrdb",
+    "xauth",
+    "setxkbmap",
+    "xdpyinfo",
+    "xwininfo",
+    "xinput",
+];
+
+fn cmd_desktop(store: &Store, action: &DesktopCommand) -> Result<()> {
+    match action {
+        DesktopCommand::Install { name, kind } => {
+            if kind != "xfce" {
+                bail!("only --kind xfce is implemented, not {kind}");
+            }
+            let vm = store.load(name)?;
+            if !vm.gpu.enabled {
+                bail!(
+                    "{name} has no gpu; a desktop needs one. Add [gpu] enabled = true to its \
+                     definition and give it a kernel with DRM_VIRTIO_GPU built in"
+                );
+            }
+            let address = desktop_address(store, name)?;
+            // A quick reachability check, so the package install is not the first thing to
+            // discover that the machine is down.
+            librevm_core::ssh::run(store.root(), &address, "true")
+                .with_context(|| format!("{name} is not reachable at {address}"))?;
+
+            println!("installing the desktop into {name}");
+            println!("  this pulls a few hundred MiB from the distribution's mirrors");
+            let packages = DESKTOP_PACKAGES.join(" ");
+            let out = librevm_core::ssh::run(
+                store.root(),
+                &address,
+                &format!("apk add --no-cache {packages} 2>&1 | tail -3"),
+            )?;
+            for line in out.lines().filter(|l| !l.trim().is_empty()) {
+                println!("  {line}");
+            }
+
+            // The launcher goes in as a file, so that what runs is what was written rather
+            // than whatever a shell made of a long quoted line.
+            librevm_core::ssh::write_file(
+                store.root(),
+                &address,
+                "/usr/local/bin/librevm-desktop",
+                DESKTOP_LAUNCHER,
+                0o755,
+            )
+            .context("installing the launcher")?;
+
+            // And it starts on boot, so a machine that is meant to have a desktop has one
+            // without anyone logging in. Alpine runs /etc/local.d/*.start from its local
+            // service, which is off by default; enabling it is left to the operator rather
+            // than done silently here.
+            librevm_core::ssh::write_file(
+                store.root(),
+                &address,
+                "/etc/local.d/librevm-desktop.start",
+                BOOT_HOOK,
+                0o755,
+            )
+            .context("installing the boot hook")?;
+
+            println!();
+            println!("  launcher : /usr/local/bin/librevm-desktop");
+            println!("  boot hook: /etc/local.d/librevm-desktop.start");
+            println!("             (run `rc-update add local default` in the guest to use it)");
+            println!();
+            println!("start it with: librevm desktop start {name}");
+            Ok(())
+        }
+
+        DesktopCommand::Start { name } => {
+            let address = desktop_address(store, name)?;
+            println!("starting the desktop in {name}");
+            // Detached, because it is a session that outlives this command.
+            let out = librevm_core::ssh::run(
+                store.root(),
+                &address,
+                "setsid nohup /usr/local/bin/librevm-desktop > /tmp/desktop.log 2>&1 < /dev/null & \
+                 sleep 30; \
+                 for p in Xorg xfwm4 xfdesktop xfce4-panel; do \
+                   printf '%s %s\\n' \"$p\" \"$(pgrep -c $p 2>/dev/null || echo 0)\"; \
+                 done",
+            )?;
+            for line in out.lines().filter(|l| !l.trim().is_empty()) {
+                println!("  {line}");
+            }
+            Ok(())
+        }
+
+        DesktopCommand::Stop { name } => {
+            let address = desktop_address(store, name)?;
+            librevm_core::ssh::run(
+                store.root(),
+                &address,
+                "pkill -f startxfce4; pkill -f xfce4-session; pkill xfwm4; pkill xfdesktop; \
+                 pkill xfce4-panel; pkill -f 'Xorg :0'; true",
+            )?;
+            println!("the desktop in {name} is stopped");
+            Ok(())
+        }
+
+        DesktopCommand::TouchArea { name } => {
+            let _ = name;
+            // The probe runs as the desktop user, because the accessibility bus of a session
+            // belongs to that session and a root process cannot join it.
+            let script = r#"
+import gi
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+
+Atspi.init()
+desktop = Atspi.get_desktop(0)
+
+def walk(node, depth=0):
+    if depth > 8:
+        return
+    try:
+        n = node.get_child_count()
+    except Exception:
+        return
+    for i in range(n):
+        try:
+            c = node.get_child_at_index(i)
+        except Exception:
+            continue
+        if c is None:
+            continue
+        yield c
+        yield from walk(c, depth + 1)
+
+best = None
+for n in walk(desktop):
+    try:
+        role = n.get_role_name() or ""
+        title = (n.get_name() or "").strip()
+    except Exception:
+        continue
+    if role not in ("frame", "dialog"):
+        continue
+    try:
+        ext = n.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+    except Exception:
+        continue
+    if ext.width <= 0 or ext.height <= 0:
+        continue
+    # The virtual machine's window is the one that looks like a screen.
+    if title.lower() in ("librevm", "crosvm") or (ext.width >= 640 and ext.height >= 480):
+        if best is None or ext.width * ext.height > best[2] * best[3]:
+            best = (ext.x, ext.y, ext.width, ext.height)
+
+if best is None:
+    print("no window found on the accessibility bus")
+else:
+    x, y, w, h = best
+    print("window in logical pixels: x=%d y=%d w=%d h=%d" % (x, y, w, h))
+    print("scaling factor to check: `gsettings get org.gnome.desktop.interface scaling-factor`")
+    print("touch_area = [%d, %d, %d, %d]   # multiply the four numbers above by the factor" % (x, y, w, h))
+"#;
+            let out = std::process::Command::new("runuser")
+                .args([
+                    "-u",
+                    "piano",
+                    "--",
+                    "env",
+                    "XDG_RUNTIME_DIR=/run/user/1000",
+                    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+                    "python3",
+                    "-c",
+                    script,
+                ])
+                .output()
+                .context("running the accessibility probe")?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                println!("{line}");
+            }
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                for line in err.lines().filter(|l| !l.trim().is_empty()).take(4) {
+                    eprintln!("  {line}");
+                }
+            }
+            Ok(())
+        }
+
+        DesktopCommand::Status { name } => {
+            let address = desktop_address(store, name)?;
+            let out = librevm_core::ssh::run(
+                store.root(),
+                &address,
+                "if [ ! -x /usr/local/bin/librevm-desktop ]; then echo installed=no; exit 0; fi; \
+                 echo installed=yes; \
+                 for p in udevd Xorg xfwm4 xfdesktop xfce4-panel; do \
+                   printf '%s=%s\\n' \"$p\" \"$(pgrep -c $p 2>/dev/null || echo 0)\"; \
+                 done",
+            )?;
+            println!("{name} at {address}");
+            for line in out.lines().filter(|l| !l.trim().is_empty()) {
+                println!("  {line}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Where a machine's guest answers ssh, by the same rule `librevm ssh` uses.
+fn desktop_address(store: &Store, name: &str) -> Result<String> {
+    guest_address(store, name)
 }
 
 // -- networking ---------------------------------------------------------------
@@ -1114,7 +1457,7 @@ fn cmd_ssh(
         }
 
         Some(SshCommand::Check { name }) => {
-            let address = guest_address(store, name)?;
+            let address = desktop_address(store, name)?;
             println!("{name} at {address}");
             let out = librevm_core::ssh::run(store.root(), &address, "uname -a");
             match out {
@@ -1132,7 +1475,7 @@ fn cmd_ssh(
 
         None => {
             let name = name.context("which machine? try `librevm list`")?;
-            let address = guest_address(store, name)?;
+            let address = desktop_address(store, name)?;
             let joined = if command.is_empty() {
                 None
             } else {

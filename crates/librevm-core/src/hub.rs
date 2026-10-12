@@ -251,6 +251,11 @@ pub fn run(store: &Store, name: &str) -> Result<()> {
     let config = store.load(name)?;
     config.validate()?;
 
+    // Set when the touch forwarder is started, so it can be told to stop when the machine
+    // does. Without it the thread would keep reading the panel after the guest was gone.
+    let touch_stop: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::new(Mutex::new(None));
+
     let plan = vm::plan(store, &config, true)?;
     let socket_path = store.console_socket(name);
 
@@ -321,6 +326,37 @@ pub fn run(store: &Store, name: &str) -> Result<()> {
     std::fs::write(store.pid_file(name), format!("{pid}\n"))
         .with_context(|| format!("writing {}", store.pid_file(name).display()))?;
     log::info!("{name}: crosvm pid {pid}");
+
+    // The touchscreen, when the machine asks for it and the host has one.
+    //
+    // This is served from here rather than from crosvm because the direct path grabs the
+    // device exclusively and the desktop is already using it; see `touch.rs`. The socket is
+    // the one `build_command` told crosvm to read.
+    if config.gpu.enabled && config.gpu.touch {
+        match crate::touch::find_touchscreen() {
+            Some(device) => {
+                let socket = crate::touch::socket_path(store.run_dir(), name);
+                let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                *touch_stop.lock().unwrap() = Some(stopping.clone());
+                let path = device.path.clone();
+                let what = device.name.clone();
+                let size = crate::touch::fallback_size(&config);
+                let area = config.gpu.touch_area;
+                // The machine's name is borrowed, so the thread gets its own copy.
+                let machine = name.to_string();
+                std::thread::spawn(move || {
+                    log::info!("{machine}: forwarding {what} ({})", path.display());
+                    if let Err(e) = crate::touch::serve(&path, &socket, size, area, stopping) {
+                        log::warn!("{machine}: the touch forwarder stopped: {e:#}");
+                    }
+                });
+            }
+            None => log::warn!(
+                "{name}: asked for a touchscreen but the host does not report one; the guest \
+                 will have a keyboard and a pointer but no touch"
+            ),
+        }
+    }
 
     let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
     let history: Arc<Mutex<History>> = Arc::new(Mutex::new(History::default()));

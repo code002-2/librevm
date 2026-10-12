@@ -12,6 +12,7 @@ pub mod image;
 pub mod net;
 pub mod ssh;
 pub mod store;
+pub mod touch;
 pub mod vm;
 
 pub use config::{
