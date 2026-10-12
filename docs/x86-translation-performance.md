@@ -88,25 +88,50 @@ The Wine startup cost is dominated by starting wineserver per command. With one 
 cost roughly halves. The Vulkan failure is a GPU driver gap in this SoC, not a Wine or FEX one,
 and it means DXVK and anything needing Vulkan will not run.
 
-## Where this lands against desktop CPUs
+## Which desktop CPU this is closest to
 
-7-Zip's MIPS rating is comparable across machines for the same build.
+A raw MIPS number does not answer that on its own, because this SoC is allowed to run at very
+different clocks depending on load. Dividing by the clock removes that variable and leaves the
+core's efficiency, which is the part that can be compared across architectures.
 
-| | rating |
-|---|---|
-| native aarch64, this machine, at 3.28 GHz | 6391-7974 |
-| x86-64 through FEX, same conditions | 5656-6391 |
+Measured, three runs each, with the clock sampled while each run was in progress:
 
-Published single-thread figures for orientation, from various runs of various 7-Zip builds:
+| | Tot | average clock | MIPS per GHz |
+|---|---|---|---|
+| native aarch64 | 8454 | 3.851 GHz | 2196 |
+| native aarch64 | 8375 | 3.765 GHz | 2224 |
+| native aarch64 | 8243 | 3.744 GHz | 2202 |
+| x86-64 through FEX | 6666 | 3.558 GHz | 1873 |
+| x86-64 through FEX | 6568 | 3.485 GHz | 1884 |
+| x86-64 through FEX | 6487 | 3.470 GHz | 1869 |
 
-* Cortex-A76 at 2.4 GHz (Raspberry Pi 5 class): 3000-3500
-* this machine, native: around 7000-8000
-* Apple M1: 9000-10000
-* Ryzen 5 3600 / i5-10400: 11000-13000
+So: **2207 MIPS/GHz natively, 1875 through FEX**, a ratio of 0.850, which is the same 1.18x the
+earlier runs gave at other clocks. sysbench agrees on the ratio at 1217 events/sec/GHz native.
 
-Those are order-of-magnitude anchors, not a ranking. What the measurements support is that this
-machine performs like a fast laptop core and roughly half a desktop Zen 2 or Comet Lake core,
-and that x86-64 software through FEX gives up about a fifth of that.
+Published anchors for the same benchmark, converted to the same units:
 
-The all-core picture is much weaker than the single-thread one: eight threads produce 2.8 times
-the throughput of one, not eight, because the sustained clock falls to about 1.7 GHz.
+| core | MIPS per GHz | how |
+|---|---|---|
+| Ryzen 5 3600 (Zen 2) | ~2750 | ~11000 MIPS at 4.0 GHz |
+| i5-10400 (Comet Lake) | ~2350 | ~10000 MIPS at 4.25 GHz |
+| **this machine, native** | **2207** | measured |
+| i7-4770 (Haswell) | ~2060 | ~7400 MIPS at 3.6 GHz |
+| **this machine, through FEX** | **1875** | measured |
+| Cortex-A76 (Raspberry Pi 5) | ~1375 | ~3300 MIPS at 2.4 GHz |
+
+The conclusion, stated as a judgement rather than a range:
+
+* **Per clock, this is a modern desktop-class core.** 2207 MIPS/GHz is about 80 percent of
+  Zen 2 and about 94 percent of Comet Lake. Oryon is not a cut-down core.
+* **In absolute single-thread terms it sits between an i7-4770 and an i5-10400**, roughly
+  80 percent of the latter. It is not a fast desktop chip, but it is a real one, not a mobile
+  part punching above its weight.
+* **Through FEX it is about 91 percent of an i7-4770**, or about 68 percent of an i5-10400.
+* **Multi-core is a different story.** Eight threads give 2.8 times one thread, not eight,
+  because the sustained clock falls to 1.7-1.9 GHz and the six smaller cores are not equal to
+  the two prime ones. Multithreaded, it behaves like a four-core desktop chip of Haswell vintage.
+
+The limitation is not the core. It is the power budget: 3.28 GHz sustained on a prime core
+against 4.0-4.5 GHz on a desktop, with the all-core clock held near 1.7 GHz by a thermal
+governor that keeps the die just under 95 C.
+
