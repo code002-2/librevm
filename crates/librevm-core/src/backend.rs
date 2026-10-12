@@ -366,7 +366,23 @@ pub fn build_command(
 
     // Kernel command line. Force the console parameters the emulated UART needs,
     // without duplicating anything the operator already asked for.
-    let cmdline = ensure_console_params(&vm.boot.cmdline);
+    //
+    // A machine with a GPU gets the framebuffer console too, which is what makes the boot
+    // visible in the window: printk goes to every console, so `tty0` puts the kernel log on
+    // the framebuffer, and ending the list with it makes `/dev/console` the framebuffer as
+    // well, so the initramfs's own output lands there too. The serial port is kept first so
+    // `librevm console` still captures everything.
+    let mut cmdline = ensure_console_params(&vm.boot.cmdline);
+    if vm.gpu.enabled && !cmdline.split_whitespace().any(|w| w == "console=tty0") {
+        let with_framebuffer = if cmdline.contains("console=") {
+            // ttyS0 stays first, tty0 goes last: the last one registered becomes
+            // /dev/console, and the initramfs writes there.
+            format!("{cmdline} console=tty0")
+        } else {
+            format!("console=tty0 {cmdline}")
+        };
+        cmdline = with_framebuffer;
+    }
     args.push("--params".to_string());
     args.push(cmdline);
 

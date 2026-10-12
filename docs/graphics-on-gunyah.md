@@ -299,6 +299,63 @@ window has not been shown to land in the corner of the screen. If it is wrong, t
 is the one number to change, and `touch_area` exists so that changing it does not need a
 rebuild.
 
+## One window, from power-on to desktop
+
+A machine with a GPU is given the framebuffer console as well as the serial one, so the
+window shows the whole boot the way a real machine does: the kernel log, then the initramfs,
+then the console, then the desktop, all in the same window.
+
+```
+--params console=ttyS0 earlycon loglevel=7 console=tty0
+```
+
+**Why `console=tty0`.** `tty0` is the current virtual terminal, which is where fbcon draws,
+which is the framebuffer, which is what crosvm's window shows. Without it the kernel has only
+the serial port to talk to, and the window stays on the boot logo:
+
+```
+/proc/consoles:   ttyS0    -W- (E   p a)   4:64          <- the serial port only
+with console=tty0:
+/proc/consoles:   tty0     -WU (EC     )   4:1
+                  ttyS0    -W- (E   p a)   4:64
+[    0.012929] printk: legacy console [tty0] enabled
+[    5.845118] printk: legacy console [ttyS0] enabled
+[    6.441363] Console: switching to colour frame buffer device 160x64
+```
+
+**Why the order is `ttyS0` then `tty0`.** printk broadcasts to every console, so the kernel
+log reaches both either way. But `/dev/console` is always major 5 minor 1, and the kernel
+routes that to the *last* console registered — which is what the initramfs writes to. Ending
+the list with `tty0` puts the initramfs's own output on the framebuffer too:
+
+```
+$ echo probe > /dev/console
+(absent from the serial capture, so it went to the framebuffer)
+```
+
+Reversing them would put the initramfs on the serial port and leave the window blank until
+the console took over. Keeping `ttyS0` in the list at all is what keeps `librevm console`
+working; it captures 362 lines of a boot.
+
+librevm appends `console=tty0` itself when a machine has a GPU, and does not when it does
+not — a machine with no framebuffer console has nowhere to send it. A `console=tty0` already
+in the definition is left alone.
+
+**X still takes the display.** fbcon does not hand the framebuffer over — `/sys/class/vtconsole/vtcon1/bind`
+stays `1` — but it does not need to: X binds the DRM node directly and the console stops being
+drawn once X owns the scanout.
+
+```
+(II) modeset(0): using drv /dev/dri/card0
+(II) modeset(0): Depth 24, (==) framebuffer bpp 32
+xdpyinfo: dimensions: 1280x1024 pixels
+```
+
+The framebuffer is 1280x1024 and the console comes up as 160 columns by 64 rows, so the
+console text is drawn at 8x16 pixels a character. On a window of that size the boot log is
+readable and the shell prompt is usable; a larger font would need `fbcon=font:` on the
+command line.
+
 ## Naming the machine
 
 A guest reports the device tree crosvm generates, so `fastfetch` says `CPU: dummy-virt`, and
