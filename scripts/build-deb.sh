@@ -16,7 +16,7 @@
 #
 set -u
 
-VERSION=0.1.0
+VERSION=0.2.0
 OUT=dist
 BUILD=no
 
@@ -79,6 +79,9 @@ install -m 755 "$DAEMON" "$pkgroot/usr/bin/librevm-daemon"
 install -m 755 "$root/scripts/librevm-gui-session"      "$pkgroot/usr/bin/librevm-gui-session"
 install -m 755 "$root/scripts/install-gunyah.sh"        "$pkgroot/usr/sbin/install-gunyah"
 install -m 755 "$root/scripts/librevm-get-gunyah.sh"    "$pkgroot/usr/libexec/librevm-get-gunyah"
+# Lets a desktop user launch the window, which needs root for Gunyah. The rule names an
+# account, so it cannot be written at install time and is a separate command.
+install -m 755 "$root/scripts/librevm-enable-desktop"   "$pkgroot/usr/bin/librevm-enable-desktop"
 
 install -m 644 "$root/packaging/librevm.desktop" "$pkgroot/usr/share/applications/librevm.desktop"
 install -m 644 "$root/packaging/librevm.svg"     "$pkgroot/usr/share/icons/hicolor/scalable/apps/librevm.svg"

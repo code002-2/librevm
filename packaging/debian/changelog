@@ -1,3 +1,28 @@
+librevm (0.2.0) trixie; urgency=medium
+
+  * A machine can be given a virtio-gpu, and its framebuffer appears in a window on
+    the host. The three things that have to be right are documented: `displays=` rather
+    than `width=`/`height=`, `--wayland-sock` as an argument rather than only in the
+    environment, and running crosvm as root, without which Gunyah refuses the vcpu.
+  * `librevm desktop install|start|stop|status|touch-area` puts XFCE in a guest and
+    runs it. No xorg.conf: a configuration naming a driver makes X treat the GPU as a
+    secondary device and find no screens. udev has to be running before X, or the
+    virtio input devices exist and are invisible.
+  * The window's keyboard and mouse are forwarded when a GPU is enabled; without them
+    a desktop is a picture.
+  * A touchscreen can be passed through, by librevm reading the panel and feeding
+    crosvm over a socket, because the direct path takes the device exclusively and the
+    desktop already holds it.
+  * The guest's console is put on the framebuffer as well as the serial port, so the
+    kernel log, the initramfs and the desktop all appear in the same window, as they do
+    on a real machine.
+  * The guest runs an init system. The boot initramfs used to hand over to a shell,
+    which made services impossible to start at boot.
+  * The hub keeps the pid file in place while crosvm lives, instead of writing it once
+    and leaving nothing responsible for it.
+
+ -- code002-2 <hiez832670@gmail.com>  Mon, 12 Oct 2026 10:30:00 +0000
+
 librevm (0.1.0) trixie; urgency=medium
 
   * First release.
