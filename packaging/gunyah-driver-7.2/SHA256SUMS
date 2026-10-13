@@ -1,0 +1,3 @@
+d6daf98377aadba4f375055ac0e8db5eab2663f15857c3b6817095c8f9ad61af  patches/02-virt-gunyah-import-gunyah-hypervisor-drivers-from-andr.patch
+e73d289439d31b957dfe0f2a675420f463171a7dd7d8796d0696fdf9bdf62d55  patches/03-virt-gunyah-adapt-to-mainline-7-2.patch
+79cc4e660977323f6d59550cce62eb1ac6d52988a62c2a54430d4e53a5b73227  patches/04-tools-virt-gunyah-add-vm-smoke-test-and-record-verific.patch

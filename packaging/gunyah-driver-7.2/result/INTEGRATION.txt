@@ -1,0 +1,30 @@
+Three lines in pre-existing files, which patch 02 adds:
+
+drivers/virt/Kconfig:53
+    source "drivers/virt/gunyah/Kconfig"
+
+drivers/virt/Makefile:13
+    obj-y                               += gunyah/
+
+arch/arm64/Kbuild:14
+    obj-$(CONFIG_GUNYAH_HYPERCALLS)     += gunyah/
+
+Kconfig symbols provided by drivers/virt/gunyah/Kconfig:
+
+    GUNYAH_HYPERCALLS
+    GUNYAH_TIMER
+    GUNYAH
+    GUNYAH_PLATFORM_HOOKS
+    GUNYAH_QCOM_PLATFORM
+    GUNYAH_IRQFD
+    GUNYAH_IOEVENTFD
+    GUNYAH_QCOM_TRUSTED_VM
+
+GUNYAH itself:
+
+    config GUNYAH
+        tristate "Gunyah Virtualization drivers"
+        depends on ARM64
+        select GUNYAH_PLATFORM_HOOKS
+        select AUXILIARY_BUS
+        imply GUNYAH_QCOM_PLATFORM if ARCH_QCOM
