@@ -55,7 +55,7 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 # loaded. A stray device node from a previous boot is not enough.
 gunyah_ready() {
     [ -c /dev/gunyah ] || return 1
-    lsmod 2>/dev/null | grep -q '^gunyah_rsc_mgr ' || return 1
+    lsmod 2>/dev/null | grep -Eq '^(gunyah_rsc_mgr|gh_rm_drv) ' || return 1
     return 0
 }
 
@@ -66,7 +66,7 @@ describe_state() {
         say "  /dev/gunyah: absent"
     fi
     local n
-    n=$(lsmod 2>/dev/null | grep -cE '^gunyah')
+    n=$(lsmod 2>/dev/null | grep -cE '^(gh_|gunyah|hvc_gunyah|qrtr_gunyah)')
     say "  gunyah modules loaded: $n"
     if [ -r /proc/config.gz ]; then
         if zcat /proc/config.gz 2>/dev/null | grep -q '^CONFIG_ARM64_BTI_KERNEL=y'; then
