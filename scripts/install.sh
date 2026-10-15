@@ -236,7 +236,7 @@ do_install() {
     say "  /var/log/librevm-gui.log is world-writable (the launcher needs it)"
 
     step "gunyah"
-    if [ -c /dev/gunyah ] && lsmod 2>/dev/null | grep -q '^gunyah_rsc_mgr '; then
+    if [ -c /dev/gunyah ] && lsmod 2>/dev/null | grep -Eq '^(gunyah_rsc_mgr|gh_rm_drv) '; then
         say "  Gunyah is already available"
     else
         say "  Gunyah is not available yet."

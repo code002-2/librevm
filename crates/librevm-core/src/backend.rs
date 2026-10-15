@@ -87,18 +87,15 @@ pub fn running_under_hypervisor() -> bool {
 
 /// Is Gunyah actually usable, as opposed to merely present?
 ///
-/// `/dev/gunyah` on its own is not enough: a stale device node survives a module
-/// reload, and crosvm needs the resource manager behind it. The module list is the
-/// honest check, because the node only appears once the driver has bound.
+/// `/dev/gunyah` alone is not enough: a stale device node can survive a module
+/// reload. Qualcomm kernels expose the resource manager as `gh_rm_drv`; older
+/// kernels use the legacy three-module stack.
 pub fn gunyah_ready() -> bool {
     if !Path::new(GUNYAH_NODE).exists() {
         return false;
     }
-    modules_loaded(&[
-        "gunyah",
-        "gunyah_hypercall",
-        "gunyah_rsc_mgr",
-    ])
+    modules_loaded(&["gh_rm_drv"])
+        || modules_loaded(&["gunyah", "gunyah_hypercall", "gunyah_rsc_mgr"])
 }
 
 /// Read `/proc/modules` and report whether every name is loaded.
