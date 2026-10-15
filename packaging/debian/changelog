@@ -1,3 +1,30 @@
+librevm (0.2.1) trixie; urgency=medium
+
+  * Guest memory is now backed with large pages. Gunyah takes guest memory away
+    from the host, and a page it takes cannot come back without being migrated
+    out of CMA first; on a device whose 696 MiB CMA area has 40 MiB free, that
+    migration has nowhere to go, and the failure mode reported elsewhere is a
+    multi-minute host stall ending in an OOM kill, or a `qcom_scm` assignment
+    failure that resets the machine. A 2 MiB page is one unit to hand over
+    rather than 512. This matters more than it looks: guest memory is served
+    from shmem, this kernel has `shmem_enabled = never`, so without the flag
+    guest memory never used large pages at all. `[gpu] hugepages = false` turns
+    it off.
+
+  * The naming of a guest's CPU and GPU is gone. A device tree overlay had been
+    setting `model`, which fixed fastfetch's `Host` line and nothing else,
+    because fastfetch takes its `CPU` line from the device tree's `compatible`
+    and splits the first entry on the comma. The image also carried a fastfetch
+    config that listed only the two modules it renamed; a `modules` array is the
+    whole list rather than a set of overrides, so a guest with that file printed
+    two lines instead of the usual dozen. Both are removed.
+
+  * Gunyah readiness accepts `gh_rm_drv` as well as the older three-module
+    stack, so the check works on kernels that expose the resource manager under
+    the newer name. Contributed by Goldzxcbug.
+
+ -- librevm <noreply@github.com>  Thu, 15 Oct 2026 20:40:00 +0800
+
 librevm (0.2.0) trixie; urgency=medium
 
   * A machine can be given a virtio-gpu, and its framebuffer appears in a window on
