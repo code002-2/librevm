@@ -568,7 +568,6 @@ where
                             ssh_user: Some(librevm_core::ssh::USER.to_string()),
                             dns: librevm_core::image::host_nameservers(),
                             root_password: None,
-                            branding: librevm_core::image::Branding::librevm(),
                         },
                     ) {
                         Ok(notes) => status.set_label(&i18n::tr_ssh_deployed(

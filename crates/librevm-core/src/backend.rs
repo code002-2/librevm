@@ -264,6 +264,13 @@ pub fn build_command(
     args.push("--mem".to_string());
     args.push(vm.memory_mib.to_string());
 
+    // Large pages for guest memory, which Gunyah transfers away from the host. See
+    // GpuConfig::hugepages: guest memory goes through shmem, and this kernel has
+    // shmem_enabled = never, so nothing else would turn them on.
+    if vm.gpu.hugepages {
+        args.push("--hugepages".to_string());
+    }
+
     if vm.hypervisor.protection != Protection::None {
         args.push("--swiotlb".to_string());
         args.push(vm.hypervisor.swiotlb_mib.to_string());

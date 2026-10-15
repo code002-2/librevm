@@ -537,6 +537,21 @@ pub struct GpuConfig {
     /// the screen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch_area: Option<[i32; 4]>,
+
+    /// Ask the kernel to back guest memory with large pages.
+    ///
+    /// Gunyah takes guest memory away from the host, and a page it takes cannot come back
+    /// without being migrated out of wherever the kernel put it. On Qualcomm that is the CMA
+    /// area, which on this device is 696 MiB with about 40 MiB free, so the migration has
+    /// nowhere to go. Large pages make the transfer cheaper and much less likely: a 2 MiB page
+    /// handed over is one unit rather than 512.
+    ///
+    /// crosvm's own words are "advise the kernel", so this is madvise and needs no hugetlbfs
+    /// pool. It matters more than it looks: guest memory goes through shmem, and this kernel
+    /// has `shmem_enabled = never`, so without this flag guest memory never uses large pages at
+    /// all — `ShmemHugePages` sits at zero while 4 GiB of file pages are backed by them.
+    #[serde(default = "default_true")]
+    pub hugepages: bool,
 }
 
 fn default_gpu_backend() -> String {
@@ -553,6 +568,7 @@ impl Default for GpuConfig {
             wayland_sock: None,
             touch: false,
             touch_area: None,
+            hugepages: true,
         }
     }
 }
